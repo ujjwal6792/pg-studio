@@ -26,13 +26,21 @@ lifecycle for you.
 
 ## Installation
 
-### Via GitHub (Beta)
+### Via GitHub
 
-Since this project is currently in Beta, the easiest way to install it is
-directly from GitHub using Cargo:
+Since this project is currently in early development, installing directly from GitHub is the easiest method.
 
+**Option 1: Install a specific Beta release (Recommended)**
+To install a specific version that has been tagged as a release, use the `--tag` flag.
 ```bash
 cargo install --git https://github.com/YOUR_USERNAME/pg-studio --tag v0.1.0-beta.1
+```
+*(To update an existing installation to a newer beta, simply append the `--force` flag).*
+
+**Option 2: Install the latest edge version (main branch)**
+If you want the absolute latest features and fixes straight from the `main` branch, omit the tag:
+```bash
+cargo install --git https://github.com/YOUR_USERNAME/pg-studio --force
 ```
 
 ### Via Crates.io (When published)
@@ -43,7 +51,7 @@ Once published to `crates.io`, you can install the beta explicitly:
 cargo install pg-studio --version 0.1.0-beta.1
 ```
 
-_(Or simply `cargo install pg-studio` once the `1.0.0` stable release drops!)_
+*(Or simply `cargo install pg-studio` once the `1.0.0` stable release drops!)*
 
 ## Prerequisites
 
