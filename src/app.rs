@@ -82,7 +82,7 @@ impl FormField {
                 "Examples: postgres, db_admin, readonly_user",
             ),
             FormField::DbPass => (
-                "Postgres user password. Securely saved in your OS Keychain (never in config files).",
+                "Postgres user password. Securely saved in your OS Keychain (only fetched when launching).",
                 "Input is masked with asterisks (*)",
             ),
         }
@@ -165,6 +165,7 @@ impl App {
         "N/A".to_string()
     }
 
+    /// Loads project metadata into form WITHOUT querying OS Keychain (prevents prompt on start/navigate)
     pub fn load_selected_into_form(&mut self) {
         self.error_message = None;
         if let Some(proj) = self.config.projects.get(self.selected_project_idx) {
@@ -177,13 +178,23 @@ impl App {
             };
             self.input_dbname = Input::from(proj.db_name.clone());
             self.input_dbuser = Input::from(proj.db_user.clone());
-            let pass = proj.get_password().unwrap_or_default();
-            self.input_dbpass = Input::from(pass);
+            self.input_dbpass = Input::default(); // DO NOT query keychain here!
             self.is_new_project = false;
         } else {
             self.reset_form();
             self.is_new_project = true;
         }
+    }
+
+    /// Fetches password from keychain ONLY when user explicitly enters edit mode
+    pub fn prepare_edit_mode(&mut self) {
+        if let Some(proj) = self.config.projects.get(self.selected_project_idx) {
+            if let Ok(pass) = proj.get_password() {
+                self.input_dbpass = Input::from(pass);
+            }
+        }
+        self.active_pane = ActivePane::ProjectForm;
+        self.mode = AppMode::EditingForm;
     }
 
     pub fn reset_form(&mut self) {
@@ -236,7 +247,9 @@ impl App {
                 .as_secs() as i64,
         };
 
-        proj.save_password(&dbpass)?;
+        if !dbpass.is_empty() {
+            proj.save_password(&dbpass)?;
+        }
 
         if self.is_new_project {
             self.config.projects.push(proj);

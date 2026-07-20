@@ -53,8 +53,7 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                         }
                         KeyCode::Char('e') => {
                             if !app.config.projects.is_empty() {
-                                app.active_pane = ActivePane::ProjectForm;
-                                app.mode = AppMode::EditingForm;
+                                app.prepare_edit_mode();
                             }
                         }
                         KeyCode::Char('d') | KeyCode::Backspace => {
@@ -127,21 +126,25 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                     },
 
                     AppMode::ConfirmDialog => match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => match app.confirm_action {
-                            Some(ConfirmationAction::Quit) => return Ok(()),
-                            Some(ConfirmationAction::DeleteProject) => {
-                                app.delete_selected_project()?;
-                                app.confirm_action = None;
-                                app.mode = AppMode::Normal;
+                        // Enter, 'y', or 'Y' confirms the action
+                        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            match app.confirm_action {
+                                Some(ConfirmationAction::Quit) => return Ok(()),
+                                Some(ConfirmationAction::DeleteProject) => {
+                                    app.delete_selected_project()?;
+                                    app.confirm_action = None;
+                                    app.mode = AppMode::Normal;
+                                }
+                                Some(ConfirmationAction::CancelEdit) => {
+                                    app.load_selected_into_form();
+                                    app.confirm_action = None;
+                                    app.mode = AppMode::Normal;
+                                }
+                                None => app.mode = AppMode::Normal,
                             }
-                            Some(ConfirmationAction::CancelEdit) => {
-                                app.load_selected_into_form();
-                                app.confirm_action = None;
-                                app.mode = AppMode::Normal;
-                            }
-                            None => app.mode = AppMode::Normal,
-                        },
-                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        }
+                        // Esc, 'n', or 'N' cancels the modal dialog
+                        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                             app.confirm_action = None;
                             app.mode = if app.active_pane == ActivePane::ProjectForm {
                                 AppMode::EditingForm
@@ -170,6 +173,8 @@ fn launch_project(tui: &mut Tui, app: &mut App) -> Result<()> {
     }
 
     let proj = app.config.projects[app.selected_project_idx].clone();
+
+    // Fetch password from OS Keychain ONLY when user hits Enter to launch!
     let dbpass = proj.get_password().unwrap_or_default();
 
     app.add_log(format!("Starting project '{}'...", proj.name));

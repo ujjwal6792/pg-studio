@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -162,7 +162,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         AppMode::EditingForm => {
             " [Tab/Down] Next Field | [Shift+Tab/Up] Prev Field | [Enter] Save Project | [Esc] Cancel Edit"
         }
-        AppMode::ConfirmDialog => " [y] Confirm Action | [n/Esc] Cancel Dialog",
+        AppMode::ConfirmDialog => " [Enter/y] Confirm | [Esc/n] Cancel",
         AppMode::Running => " [q/Esc] Stop SSH & Exit Studio",
     };
 
@@ -257,17 +257,26 @@ fn draw_form_fields(f: &mut Frame, app: &App, area: Rect) {
                 )
             }
         } else if *is_pass {
-            (
-                "*".repeat(value.len()),
-                if is_active {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                },
-            )
+            if value.is_empty() && !app.is_new_project && app.mode != AppMode::EditingForm {
+                (
+                    "•••••••• (Stored in Keychain)".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else if value.is_empty() {
+                ("".to_string(), Style::default().fg(Color::White))
+            } else {
+                (
+                    "*".repeat(value.len()),
+                    if is_active {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                )
+            }
         } else {
             (
                 value.to_string(),
@@ -327,7 +336,7 @@ fn draw_form_fields(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_confirm_popup(f: &mut Frame, action: ConfirmationAction) {
-    let area = centered_rect(50, 25, f.area());
+    let area = centered_rect(60, 25, f.area());
 
     let (title, prompt, theme_color) = match action {
         ConfirmationAction::DeleteProject => (
@@ -358,14 +367,14 @@ fn render_confirm_popup(f: &mut Frame, action: ConfirmationAction) {
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "  [Y] ",
+                " ⏎ ",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Confirm      ", Style::default().fg(Color::Gray)),
+            Span::styled("Confirm        ", Style::default().fg(Color::Gray)),
             Span::styled(
-                "[N] ",
+                " ⎋ ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::styled("Cancel  ", Style::default().fg(Color::Gray)),
@@ -381,13 +390,14 @@ fn render_confirm_popup(f: &mut Frame, action: ConfirmationAction) {
         ))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme_color));
+        .border_style(Style::default().fg(theme_color))
+        .padding(Padding::horizontal(4));
 
     let paragraph = Paragraph::new(popup_text)
         .alignment(Alignment::Center)
         .block(popup_block);
 
-    f.render_widget(Clear, area); // Clear background under modal
+    f.render_widget(Clear, area);
     f.render_widget(paragraph, area);
 }
 
