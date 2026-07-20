@@ -63,7 +63,7 @@ fn write_drizzle_config(workspace_dir: &Path) -> Result<()> {
 import { defineConfig } from 'drizzle-kit';
 
 export default defineConfig({
-  schema: './schema.ts',
+  schema: './drizzle/schema.ts',
   out: './drizzle',
   dialect: 'postgresql',
   dbCredentials: {
@@ -105,6 +105,60 @@ pub fn run_drizzle_studio(
         return Err(anyhow!(
             "drizzle-kit pull failed. Check your database credentials and connection."
         ));
+    }
+
+    // --- FIX: Sanitize drizzle generated schema to remove broken SQL defaults ---
+    let schema_path = workspace_dir.join("drizzle").join("schema.ts");
+    if schema_path.exists() {
+        let schema = fs::read_to_string(&schema_path)
+            .context("Failed to read schema.ts for sanitization")?;
+        
+        // drizzle-kit sometimes outputs invalid TS for default values containing escaped quotes (e.g. \'hex\') or type casts (::text)
+        // We strip out the specific .default(...) blocks that look broken to prevent esbuild syntax errors,
+        // using a bracket-matching approach to preserve .notNull() or .primaryKey() chaining.
+        let mut sanitized = false;
+        let mut new_schema = String::new();
+
+        for line in schema.lines() {
+            if line.contains(".default(") && (line.contains("\\'") || line.contains("::")) {
+                if let Some(start_idx) = line.find(".default(") {
+                    let mut open_brackets = 0;
+                    let mut end_idx = start_idx;
+                    for (i, c) in line[start_idx..].char_indices() {
+                        if c == '(' {
+                            open_brackets += 1;
+                        } else if c == ')' {
+                            open_brackets -= 1;
+                            if open_brackets == 0 {
+                                end_idx = start_idx + i;
+                                break;
+                            }
+                        }
+                    }
+                    if open_brackets == 0 {
+                        new_schema.push_str(&line[..start_idx]);
+                        new_schema.push_str(&line[end_idx + 1..]);
+                        new_schema.push('\n');
+                        sanitized = true;
+                        continue;
+                    }
+                }
+            }
+            new_schema.push_str(line);
+            new_schema.push('\n');
+        }
+        
+        // Fix for "ReferenceError: unknown is not defined" when drizzle-kit encounters unsupported types (e.g. bytea)
+        if new_schema.contains("unknown(") {
+            new_schema = new_schema.replace("unknown(", "text(");
+            sanitized = true;
+        }
+
+        if sanitized {
+            println!("Sanitizing invalid default values in generated schema...");
+            fs::write(&schema_path, new_schema)
+                .context("Failed to write sanitized schema.ts")?;
+        }
     }
 
     println!("Launching Drizzle Studio...");
