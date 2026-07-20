@@ -1,70 +1,183 @@
-use anyhow::{Context, Result};
-use clap::Parser;
-use pg_studio::cli::run_prompts;
-use pg_studio::config::AppConfig;
-use pg_studio::drizzle::{check_dependencies, run_drizzle_studio};
-use pg_studio::ssh::establish_tunnel;
-use std::process::exit;
-use std::sync::{Arc, Mutex};
-
-/// pg-studio: Introspect a remote Postgres database via SSH tunnel and launch Drizzle Studio.
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {}
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode};
+use pg_studio::{
+    app::{ActivePane, App, AppMode, FormField},
+    drizzle::{check_dependencies, run_drizzle_studio},
+    ssh::establish_tunnel,
+    tui::Tui,
+    ui::draw,
+    updater::update_cli,
+};
+use std::time::Duration;
+use tui_input::backend::crossterm::EventHandler;
 
 fn main() -> Result<()> {
-    // Basic argument parsing (for version, help, etc.)
-    let _args = Args::parse();
+    let mut app = App::new()?;
+    let mut tui = Tui::new()?;
+    tui.enter()?;
 
-    // Setup graceful exit handler
-    let running = Arc::new(Mutex::new(true));
-    let r = running.clone();
-    ctrlc::set_handler(move || {
-        let mut is_running = r.lock().unwrap();
-        if *is_running {
-            *is_running = false;
-            println!("\nReceived Ctrl-C, shutting down gracefully...");
-            exit(0); // This will drop variables in main, but actually exit(0) DOES NOT run drops.
-            // To fix that, we can just let it exit, or better, we can signal a channel.
-            // Actually, if we just rely on `Command::spawn` inside `main`, an exit(0)
-            // will kill child processes if they are properly managed, but `Command::spawn`
-            // children might become orphans.
-            // Let's rely on standard Rust drop behaviour by NOT calling exit(0) immediately,
-            // but since we are blocked in `wait()` for studio, we can let Drizzle Studio
-            // handle SIGINT which will make `studio_child.wait()` return, and then `main` returns.
+    let res = run_app(&mut tui, &mut app);
+
+    tui.exit()?;
+
+    if let Err(err) = res {
+        eprintln!("Error: {:?}", err);
+    }
+
+    Ok(())
+}
+
+fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
+    loop {
+        tui.terminal.draw(|f| draw(f, app))?;
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                match app.mode {
+                    AppMode::Normal => match key.code {
+                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Tab => {
+                            app.active_pane = match app.active_pane {
+                                ActivePane::ProjectsList => ActivePane::ProjectForm,
+                                ActivePane::ProjectForm => ActivePane::Logs,
+                                ActivePane::Logs => ActivePane::ProjectsList,
+                            };
+                        }
+                        KeyCode::Char('n') => {
+                            app.reset_form();
+                            app.active_pane = ActivePane::ProjectForm;
+                            app.mode = AppMode::EditingForm;
+                        }
+                        KeyCode::Char('e') => {
+                            if !app.config.projects.is_empty() {
+                                app.active_pane = ActivePane::ProjectForm;
+                                app.mode = AppMode::EditingForm;
+                            }
+                        }
+                        KeyCode::Char('d') | KeyCode::Backspace => {
+                            if app.active_pane == ActivePane::ProjectsList {
+                                app.delete_selected_project()?;
+                            }
+                        }
+                        KeyCode::Char('u') => {
+                            app.add_log("Checking for updates...".to_string());
+                            match update_cli() {
+                                Ok(_) => app.add_log("Self-update check finished.".to_string()),
+                                Err(e) => app.add_log(format!("Self-update error: {}", e)),
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if app.active_pane == ActivePane::ProjectsList
+                                && app.selected_project_idx > 0
+                            {
+                                app.selected_project_idx -= 1;
+                                app.load_selected_into_form();
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if app.active_pane == ActivePane::ProjectsList
+                                && !app.config.projects.is_empty()
+                                && app.selected_project_idx < app.config.projects.len() - 1
+                            {
+                                app.selected_project_idx += 1;
+                                app.load_selected_into_form();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            // Launch project!
+                            if let Err(e) = launch_project(tui, app) {
+                                app.add_log(format!("Execution error: {}", e));
+                            }
+                        }
+                        _ => {}
+                    },
+                    AppMode::EditingForm => match key.code {
+                        KeyCode::Esc => {
+                            app.mode = AppMode::Normal;
+                            app.load_selected_into_form();
+                        }
+                        KeyCode::Tab | KeyCode::Down => {
+                            app.active_field = app.active_field.next();
+                        }
+                        KeyCode::BackTab | KeyCode::Up => {
+                            app.active_field = app.active_field.prev();
+                        }
+                        KeyCode::Enter => {
+                            app.save_form_to_project()?;
+                            app.mode = AppMode::Normal;
+                        }
+                        _ => {
+                            let input_req = match app.active_field {
+                                FormField::Name => &mut app.input_name,
+                                FormField::SshConnection => &mut app.input_ssh,
+                                FormField::DbPort => &mut app.input_port,
+                                FormField::DbName => &mut app.input_dbname,
+                                FormField::DbUser => &mut app.input_dbuser,
+                                FormField::DbPass => &mut app.input_dbpass,
+                            };
+                            input_req.handle_event(&Event::Key(key));
+                        }
+                    },
+                    AppMode::Running => {
+                        // In running mode, any key exits back to normal mode
+                        if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
+                            app.mode = AppMode::Normal;
+                        }
+                    }
+                }
+            }
         }
-    })
-    .context("Error setting Ctrl-C handler")?;
+    }
+}
 
-    // Check for npm/npx
-    check_dependencies()?;
-
-    // Load config
-    let config = AppConfig::load().unwrap_or_default();
-
-    // Prompt user
-    let (state, new_config) = run_prompts(config)?;
-
-    // Save defaults
-    if let Err(e) = new_config.save() {
-        eprintln!("Warning: Failed to save config: {}", e);
+fn launch_project(tui: &mut Tui, app: &mut App) -> Result<()> {
+    if app.config.projects.is_empty() {
+        app.add_log("No project selected to launch.".to_string());
+        return Ok(());
     }
 
-    // Establish SSH Tunnel
-    let tunnel = establish_tunnel(&state.ssh_connection, &state.remote_db_port)?;
+    let proj = app.config.projects[app.selected_project_idx].clone();
+    let dbpass = proj.get_password().unwrap_or_default();
 
-    // Run Drizzle Studio
-    if let Err(e) = run_drizzle_studio(
-        tunnel.local_port,
-        &state.db_name,
-        &state.db_user,
-        &state.db_pass,
-    ) {
-        eprintln!("Error running Drizzle Studio: {}", e);
+    app.add_log(format!("Starting project '{}'...", proj.name));
+
+    // Temporarily exit TUI raw mode so Drizzle Studio and SSH output stream naturally or run cleanly
+    tui.exit()?;
+
+    println!("\n=== Starting {} ===", proj.name);
+    if let Err(e) = check_dependencies() {
+        eprintln!("Dependency check failed: {}", e);
+    } else {
+        match establish_tunnel(&proj.ssh_connection, &proj.db_port) {
+            Ok(tunnel) => {
+                println!("SSH Tunnel established on local port {}", tunnel.local_port);
+                if let Err(e) =
+                    run_drizzle_studio(tunnel.local_port, &proj.db_name, &proj.db_user, &dbpass)
+                {
+                    eprintln!("Drizzle Studio error: {}", e);
+                }
+            }
+            Err(e) => {
+                eprintln!("SSH Tunnel error: {}", e);
+            }
+        }
     }
 
-    // Tunnel drops here, killing the SSH process.
-    drop(tunnel);
+    println!("\nPress Enter to return to pg-studio TUI...");
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
+
+    // Re-enter TUI
+    tui.enter()?;
+
+    // Update last_opened timestamp
+    if let Some(p) = app.config.projects.get_mut(app.selected_project_idx) {
+        p.last_opened = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+    }
+    app.config.save()?;
 
     Ok(())
 }

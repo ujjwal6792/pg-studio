@@ -112,7 +112,7 @@ pub fn run_drizzle_studio(
     if schema_path.exists() {
         let schema = fs::read_to_string(&schema_path)
             .context("Failed to read schema.ts for sanitization")?;
-        
+
         // drizzle-kit sometimes outputs invalid TS for default values containing escaped quotes (e.g. \'hex\') or type casts (::text)
         // We strip out the specific .default(...) blocks that look broken to prevent esbuild syntax errors,
         // using a bracket-matching approach to preserve .notNull() or .primaryKey() chaining.
@@ -147,7 +147,7 @@ pub fn run_drizzle_studio(
             new_schema.push_str(line);
             new_schema.push('\n');
         }
-        
+
         // Fix for "ReferenceError: unknown is not defined" when drizzle-kit encounters unsupported types (e.g. bytea)
         if new_schema.contains("unknown(") {
             new_schema = new_schema.replace("unknown(", "text(");
@@ -156,8 +156,7 @@ pub fn run_drizzle_studio(
 
         if sanitized {
             println!("Sanitizing invalid default values in generated schema...");
-            fs::write(&schema_path, new_schema)
-                .context("Failed to write sanitized schema.ts")?;
+            fs::write(&schema_path, new_schema).context("Failed to write sanitized schema.ts")?;
         }
     }
 

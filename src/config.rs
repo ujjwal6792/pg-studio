@@ -1,15 +1,37 @@
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
-    pub ssh_connection: Option<String>,
-    pub db_port: Option<String>,
-    pub db_name: Option<String>,
-    pub db_user: Option<String>,
+    #[serde(default)]
+    pub projects: Vec<ProjectConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProjectConfig {
+    pub name: String,
+    pub ssh_connection: String,
+    pub db_port: String,
+    pub db_name: String,
+    pub db_user: String,
+    pub last_opened: i64,
+}
+
+impl ProjectConfig {
+    pub fn save_password(&self, password: &str) -> Result<()> {
+        let entry = Entry::new("pg-studio", &self.name)?;
+        entry.set_password(password)?;
+        Ok(())
+    }
+
+    pub fn get_password(&self) -> Result<String> {
+        let entry = Entry::new("pg-studio", &self.name)?;
+        Ok(entry.get_password()?)
+    }
 }
 
 impl AppConfig {
@@ -26,7 +48,11 @@ impl AppConfig {
         }
     }
 
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&mut self) -> Result<()> {
+        // Sort projects by last opened descending before saving
+        self.projects
+            .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+
         let config_path = Self::config_file_path()?;
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
