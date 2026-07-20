@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, ProjectConfig};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use chrono::{Local, TimeZone};
 use std::sync::{Arc, Mutex};
 use tui_input::Input;
 
@@ -14,7 +15,15 @@ pub enum ActivePane {
 pub enum AppMode {
     Normal,
     EditingForm,
+    ConfirmDialog,
     Running,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ConfirmationAction {
+    DeleteProject,
+    CancelEdit,
+    Quit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +58,35 @@ impl FormField {
             FormField::DbPass => FormField::DbUser,
         }
     }
+
+    pub fn get_help(&self) -> (&'static str, &'static str) {
+        match self {
+            FormField::Name => (
+                "Unique identifier for this project. If left blank, defaults to database_name@ssh_host.",
+                "Examples: production-us-east, staging-db, app_db@ubuntu@192.168.1.5",
+            ),
+            FormField::SshConnection => (
+                "SSH connection string to reach the remote server hosting the Postgres database.",
+                "Examples: ubuntu@13.233.0.0, root@ec2.compute.amazonaws.com, admin@my-server.com",
+            ),
+            FormField::DbPort => (
+                "The remote port Postgres is listening on. Leave blank to default to 5432.",
+                "Examples: 5432, 5433, 6432",
+            ),
+            FormField::DbName => (
+                "Name of the target Postgres database on the remote server.",
+                "Examples: postgres, production_main, app_db_v2",
+            ),
+            FormField::DbUser => (
+                "Postgres database user with read/introspection permissions.",
+                "Examples: postgres, db_admin, readonly_user",
+            ),
+            FormField::DbPass => (
+                "Postgres user password. Securely saved in your OS Keychain (never in config files).",
+                "Input is masked with asterisks (*)",
+            ),
+        }
+    }
 }
 
 pub struct App {
@@ -56,6 +94,7 @@ pub struct App {
     pub selected_project_idx: usize,
     pub active_pane: ActivePane,
     pub mode: AppMode,
+    pub confirm_action: Option<ConfirmationAction>,
 
     // Form inputs
     pub input_name: Input,
@@ -68,6 +107,7 @@ pub struct App {
 
     pub is_new_project: bool,
     pub status_message: String,
+    pub error_message: Option<String>,
     pub logs: Arc<Mutex<Vec<String>>>,
     pub running_process: bool,
 }
@@ -84,6 +124,7 @@ impl App {
             selected_project_idx: 0,
             active_pane: ActivePane::ProjectsList,
             mode: AppMode::Normal,
+            confirm_action: None,
 
             input_name: Input::default(),
             input_ssh: Input::default(),
@@ -97,6 +138,7 @@ impl App {
             status_message: String::from(
                 "Ready. Press 'n' for New Project, 'Enter' to launch selected.",
             ),
+            error_message: None,
             logs: Arc::new(Mutex::new(Vec::new())),
             running_process: false,
         };
@@ -111,11 +153,28 @@ impl App {
         }
     }
 
+    pub fn formatted_last_opened(&self) -> String {
+        if let Some(proj) = self.config.projects.get(self.selected_project_idx) {
+            if proj.last_opened == 0 {
+                return "Never".to_string();
+            }
+            if let Some(dt) = Local.timestamp_opt(proj.last_opened, 0).single() {
+                return dt.format("%Y-%m-%d %H:%M:%S").to_string();
+            }
+        }
+        "N/A".to_string()
+    }
+
     pub fn load_selected_into_form(&mut self) {
+        self.error_message = None;
         if let Some(proj) = self.config.projects.get(self.selected_project_idx) {
             self.input_name = Input::from(proj.name.clone());
             self.input_ssh = Input::from(proj.ssh_connection.clone());
-            self.input_port = Input::from(proj.db_port.clone());
+            self.input_port = if proj.db_port == "5432" {
+                Input::default()
+            } else {
+                Input::from(proj.db_port.clone())
+            };
             self.input_dbname = Input::from(proj.db_name.clone());
             self.input_dbuser = Input::from(proj.db_user.clone());
             let pass = proj.get_password().unwrap_or_default();
@@ -128,9 +187,10 @@ impl App {
     }
 
     pub fn reset_form(&mut self) {
+        self.error_message = None;
         self.input_name = Input::default();
         self.input_ssh = Input::default();
-        self.input_port = Input::from("5432");
+        self.input_port = Input::default();
         self.input_dbname = Input::default();
         self.input_dbuser = Input::default();
         self.input_dbpass = Input::default();
@@ -145,19 +205,29 @@ impl App {
         let dbuser = self.input_dbuser.value().to_string();
         let dbpass = self.input_dbpass.value().to_string();
 
+        let final_port = if port.trim().is_empty() {
+            "5432".to_string()
+        } else {
+            port.trim().to_string()
+        };
+
         let mut name = self.input_name.value().trim().to_string();
         if name.is_empty() {
             name = format!("{}@{}", dbname, ssh);
         }
 
+        let existing_match = self.config.projects.iter().position(|p| p.name == name);
+        if let Some(matching_idx) = existing_match {
+            if self.is_new_project || matching_idx != self.selected_project_idx {
+                self.error_message = Some(format!("A project named '{}' already exists!", name));
+                return Err(anyhow!("Project name must be unique"));
+            }
+        }
+
         let proj = ProjectConfig {
             name: name.clone(),
             ssh_connection: ssh,
-            db_port: if port.is_empty() {
-                "5432".to_string()
-            } else {
-                port
-            },
+            db_port: final_port,
             db_name: dbname,
             db_user: dbuser,
             last_opened: std::time::SystemTime::now()
@@ -178,6 +248,7 @@ impl App {
         self.config.save()?;
         self.load_selected_into_form();
         self.status_message = format!("Project '{}' saved successfully!", name);
+        self.error_message = None;
         Ok(())
     }
 

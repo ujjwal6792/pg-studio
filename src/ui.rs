@@ -1,10 +1,10 @@
-use crate::app::{ActivePane, App, AppMode, FormField};
+use crate::app::{ActivePane, App, AppMode, ConfirmationAction, FormField};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -12,9 +12,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
-            Constraint::Min(10),   // Content (Left: List, Right: Form)
-            Constraint::Length(8), // Logs / Output
-            Constraint::Length(1), // Help / Footer
+            Constraint::Min(12),   // Content (Left: List, Right: Form)
+            Constraint::Length(8), // Logs / Guidance Output
+            Constraint::Length(1), // Footer / Help Bar
         ])
         .split(f.area());
 
@@ -38,7 +38,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     );
     f.render_widget(header, main_chunks[0]);
 
-    // 2. Main Content Split (Left: Projects List, Right: Project Details/Form)
+    // 2. Main Content Split
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
@@ -93,12 +93,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         Style::default().fg(Color::DarkGray)
     };
 
+    let form_title = if app.is_new_project {
+        " New Project Config "
+    } else {
+        " Edit Project Config "
+    };
+
     let form_block = Block::default()
-        .title(if app.is_new_project {
-            " New Project Config "
-        } else {
-            " Edit Project Config "
-        })
+        .title(form_title)
         .borders(Borders::ALL)
         .border_style(form_border_style);
 
@@ -107,48 +109,72 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_form_fields(f, app, form_inner);
 
-    // 3. Bottom Pane: Logs
+    // 3. Bottom Pane: Logs OR Field Guidance & Examples
     let log_border_style = if app.active_pane == ActivePane::Logs {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
-    let logs_text = if let Ok(logs) = app.logs.lock() {
-        logs.join("\n")
-    } else {
-        String::new()
+    let (bottom_title, bottom_content) = match app.mode {
+        AppMode::EditingForm => {
+            let (desc, example) = app.active_field.get_help();
+            (
+                format!(" Field Guide: {:?} ", app.active_field),
+                format!("💡 {}\n\n📌 {}", desc, example),
+            )
+        }
+        _ => {
+            let logs_text = if let Ok(logs) = app.logs.lock() {
+                if logs.is_empty() {
+                    app.status_message.clone()
+                } else {
+                    logs.join("\n")
+                }
+            } else {
+                app.status_message.clone()
+            };
+            (" Logs & Output ".to_string(), logs_text)
+        }
     };
 
-    let logs_widget = Paragraph::new(logs_text)
+    let bottom_widget = Paragraph::new(bottom_content)
         .block(
             Block::default()
-                .title(" Logs & Output ")
+                .title(bottom_title)
                 .borders(Borders::ALL)
                 .border_style(log_border_style),
         )
         .wrap(Wrap { trim: false });
-    f.render_widget(logs_widget, main_chunks[2]);
+    f.render_widget(bottom_widget, main_chunks[2]);
 
-    // 4. Help / Footer
+    // 4. Footer / Help Bar
     let help_text = match app.mode {
         AppMode::Normal => match app.active_pane {
             ActivePane::ProjectsList => {
-                " [Tab] Switch Pane | [n] New Project | [e] Edit | [d] Delete | [Enter] Launch Studio | [u] Self Update | [q] Quit"
+                " [Tab] Switch Pane | [n] New Project | [e] Edit | [d] Delete | [Enter] Launch Studio | [u] Self Update | [q/Esc] Quit"
             }
             ActivePane::ProjectForm => {
-                " [Tab] Switch Pane | [e] Edit Form Fields | [n] Clear & New | [Enter] Launch Studio | [q] Quit"
+                " [Tab] Switch Pane | [e] Edit Form Fields | [n] Clear & New | [Enter] Launch Studio | [q/Esc] Quit"
             }
-            ActivePane::Logs => " [Tab] Switch Pane | [q] Quit",
+            ActivePane::Logs => " [Tab] Switch Pane | [q/Esc] Quit",
         },
         AppMode::EditingForm => {
-            " [Tab/Down] Next Field | [Shift+Tab/Up] Prev Field | [Enter] Save & Finish | [Esc] Cancel Edit"
+            " [Tab/Down] Next Field | [Shift+Tab/Up] Prev Field | [Enter] Save Project | [Esc] Cancel Edit"
         }
+        AppMode::ConfirmDialog => " [y] Confirm Action | [n/Esc] Cancel Dialog",
         AppMode::Running => " [q/Esc] Stop SSH & Exit Studio",
     };
 
     let footer = Paragraph::new(Span::styled(help_text, Style::default().fg(Color::Yellow)));
     f.render_widget(footer, main_chunks[3]);
+
+    // 5. Render Centered Confirmation Modal Popup if active
+    if app.mode == AppMode::ConfirmDialog {
+        if let Some(action) = app.confirm_action {
+            render_confirm_popup(f, action);
+        }
+    }
 }
 
 fn draw_form_fields(f: &mut Frame, app: &App, area: Rect) {
@@ -161,6 +187,8 @@ fn draw_form_fields(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(2), // DB Name
             Constraint::Length(2), // DB User
             Constraint::Length(2), // DB Pass
+            Constraint::Length(2), // Last Opened Date
+            Constraint::Length(2), // Error message if any
             Constraint::Min(0),
         ])
         .split(area);
@@ -168,37 +196,37 @@ fn draw_form_fields(f: &mut Frame, app: &App, area: Rect) {
     let fields = [
         (
             FormField::Name,
-            "Project Name:",
+            "Project Name",
             app.input_name.value(),
             false,
         ),
         (
             FormField::SshConnection,
-            "SSH String:",
+            "SSH String",
             app.input_ssh.value(),
             false,
         ),
         (
             FormField::DbPort,
-            "Remote DB Port:",
+            "Remote DB Port",
             app.input_port.value(),
             false,
         ),
         (
             FormField::DbName,
-            "Database Name:",
+            "Database Name",
             app.input_dbname.value(),
             false,
         ),
         (
             FormField::DbUser,
-            "Database User:",
+            "Database User",
             app.input_dbuser.value(),
             false,
         ),
         (
             FormField::DbPass,
-            "Database Pass:",
+            "Database Pass",
             app.input_dbpass.value(),
             true,
         ),
@@ -213,31 +241,172 @@ fn draw_form_fields(f: &mut Frame, app: &App, area: Rect) {
             && app.active_field == *field_type
             && app.mode == AppMode::EditingForm;
 
-        let display_val = if *is_pass {
-            "*".repeat(value.len())
+        let (display_val, val_style) = if *field_type == FormField::DbPort && value.is_empty() {
+            if is_active {
+                (
+                    "5432 (default)".to_string(),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (
+                    "5432 (default)".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )
+            }
+        } else if *is_pass {
+            (
+                "*".repeat(value.len()),
+                if is_active {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            )
         } else {
-            value.to_string()
+            (
+                value.to_string(),
+                if is_active {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            )
         };
 
         let label_style = if is_active {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
 
-        let val_style = if is_active {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
-        } else {
-            Style::default().fg(Color::White)
-        };
+        let prefix_indicator = if is_active { " ▶ " } else { "   " };
 
         let line = Line::from(vec![
-            Span::styled(format!("{:<15} ", label), label_style),
+            Span::styled(prefix_indicator, Style::default().fg(Color::Cyan)),
+            Span::styled(format!("{:<15}: ", label), label_style),
             Span::styled(display_val, val_style),
         ]);
 
         f.render_widget(Paragraph::new(line), chunks[idx]);
     }
+
+    // Render Last Opened Date
+    if chunks.len() > 6 {
+        let last_opened_str = app.formatted_last_opened();
+        let date_line = Line::from(vec![
+            Span::styled("   Last Opened    : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(last_opened_str, Style::default().fg(Color::Magenta)),
+        ]);
+        f.render_widget(Paragraph::new(date_line), chunks[6]);
+    }
+
+    // Render Error Message if present
+    if let Some(err_msg) = &app.error_message {
+        if chunks.len() > 7 {
+            let err_line = Line::from(vec![
+                Span::styled(
+                    "   ⚠️ Error: ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(err_msg, Style::default().fg(Color::LightRed)),
+            ]);
+            f.render_widget(Paragraph::new(err_line), chunks[7]);
+        }
+    }
+}
+
+fn render_confirm_popup(f: &mut Frame, action: ConfirmationAction) {
+    let area = centered_rect(50, 25, f.area());
+
+    let (title, prompt, theme_color) = match action {
+        ConfirmationAction::DeleteProject => (
+            " Delete Project ",
+            "Are you sure you want to delete this project?",
+            Color::Red,
+        ),
+        ConfirmationAction::CancelEdit => (
+            " Discard Changes ",
+            "Are you sure you want to discard unsaved changes?",
+            Color::Yellow,
+        ),
+        ConfirmationAction::Quit => (
+            " Exit pg-studio ",
+            "Are you sure you want to exit pg-studio?",
+            Color::Cyan,
+        ),
+    };
+
+    let popup_text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            prompt,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  [Y] ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Confirm      ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                "[N] ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Cancel  ", Style::default().fg(Color::Gray)),
+        ]),
+    ];
+
+    let popup_block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme_color)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme_color));
+
+    let paragraph = Paragraph::new(popup_text)
+        .alignment(Alignment::Center)
+        .block(popup_block);
+
+    f.render_widget(Clear, area); // Clear background under modal
+    f.render_widget(paragraph, area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
