@@ -120,11 +120,23 @@ pub fn run_drizzle_studio(
         let mut new_schema = String::new();
 
         for line in schema.lines() {
-            if line.contains(".default(") && (line.contains("\\'") || line.contains("::")) {
-                if let Some(start_idx) = line.find(".default(") {
+            let mut current_line = line.to_string();
+
+            // Fix empty string defaults corrupted by drizzle-kit (e.g. .default(') or .default("))
+            if current_line.contains(".default(')") {
+                current_line = current_line.replace(".default(')", ".default('')");
+                sanitized = true;
+            }
+            if current_line.contains(".default(\")") {
+                current_line = current_line.replace(".default(\")", ".default(\"\")");
+                sanitized = true;
+            }
+
+            if current_line.contains(".default(") && (current_line.contains("\\'") || current_line.contains("::")) {
+                if let Some(start_idx) = current_line.find(".default(") {
                     let mut open_brackets = 0;
                     let mut end_idx = start_idx;
-                    for (i, c) in line[start_idx..].char_indices() {
+                    for (i, c) in current_line[start_idx..].char_indices() {
                         if c == '(' {
                             open_brackets += 1;
                         } else if c == ')' {
@@ -136,15 +148,17 @@ pub fn run_drizzle_studio(
                         }
                     }
                     if open_brackets == 0 {
-                        new_schema.push_str(&line[..start_idx]);
-                        new_schema.push_str(&line[end_idx + 1..]);
+                        let mut fixed = String::new();
+                        fixed.push_str(&current_line[..start_idx]);
+                        fixed.push_str(&current_line[end_idx + 1..]);
+                        new_schema.push_str(&fixed);
                         new_schema.push('\n');
                         sanitized = true;
                         continue;
                     }
                 }
             }
-            new_schema.push_str(line);
+            new_schema.push_str(&current_line);
             new_schema.push('\n');
         }
 

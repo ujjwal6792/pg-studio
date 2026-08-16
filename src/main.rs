@@ -65,10 +65,10 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                             }
                         }
                         KeyCode::Char('u') => {
-                            app.add_log("Checking for updates...".to_string());
+                            app.add_log("Checking GitHub Releases for updates...".to_string());
                             match update_cli() {
-                                Ok(_) => app.add_log("Self-update check finished.".to_string()),
-                                Err(e) => app.add_log(format!("Self-update error: {}", e)),
+                                Ok(msg) => app.add_log(msg),
+                                Err(e) => app.add_log(format!("Self-update error: {:#}", e)),
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -126,7 +126,6 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                     },
 
                     AppMode::ConfirmDialog => match key.code {
-                        // Enter, 'y', or 'Y' confirms the action
                         KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                             match app.confirm_action {
                                 Some(ConfirmationAction::Quit) => return Ok(()),
@@ -143,7 +142,6 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                                 None => app.mode = AppMode::Normal,
                             }
                         }
-                        // Esc, 'n', or 'N' cancels the modal dialog
                         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                             app.confirm_action = None;
                             app.mode = if app.active_pane == ActivePane::ProjectForm {
@@ -173,8 +171,6 @@ fn launch_project(tui: &mut Tui, app: &mut App) -> Result<()> {
     }
 
     let proj = app.config.projects[app.selected_project_idx].clone();
-
-    // Fetch password from OS Keychain ONLY when user hits Enter to launch!
     let dbpass = proj.get_password().unwrap_or_default();
 
     app.add_log(format!("Starting project '{}'...", proj.name));

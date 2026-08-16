@@ -1,91 +1,95 @@
-# pg-studio
+# pg-studio 🚀
 
 `pg-studio` is a production-ready, publishable Rust CLI tool that automates the
-incredibly tedious process of SSH tunneling into a remote server, introspecting
-a Postgres database, and launching
+process of SSH tunneling into a remote server, introspecting a Postgres
+database, and launching
 [Drizzle Studio](https://orm.drizzle.team/drizzle-studio/overview) — all without
 requiring an existing Drizzle codebase.
 
 If you have a remote Postgres database (e.g. on AWS EC2, DigitalOcean, or
-anywhere else) and want to visually explore your data using the beautiful
-Drizzle Studio interface over an SSH tunnel, `pg-studio` handles the entire
-lifecycle for you.
+anywhere else) and want to visually explore your data using Drizzle Studio over
+an SSH tunnel, `pg-studio` handles the entire lifecycle for you.
 
-## Features
+## Features ✨
 
-- **Beautiful Terminal UI**: Rich interactive prompts (powered by `inquire`) to
-  configure your database connection.
-- **Smart Config Management**: Remembers your SSH strings, ports, and usernames,
-  while strictly _never_ saving your password to disk.
+- **Lazygit-Style TUI Dashboard**: Interactive 3-pane terminal UI powered by
+  `ratatui` (Projects List, Project Config, Logs & Field Guides).
+- **Multi-Project Support**: Manage multiple database connections sorted
+  automatically by your most recent usage.
+- **Native OS Keychain Security**: Passwords are securely stored in your OS's
+  native secure store (macOS Keychain, Linux Secret Service, Windows Credential
+  Manager).
 - **Automated SSH Tunneling**: Dynamically binds to a free local port and
   strictly manages the SSH process lifecycle (automatically cleaning up the
   background process when the app closes).
 - **Zero-Config Drizzle Integration**: Automatically provisions an isolated Node
   workspace, installs Drizzle, generates configs, pulls your schema, sanitizes
   any unsupported Postgres data types (e.g. `bytea`), and launches the Studio.
+- **In-App Self-Updating (`u` key)**: Press `u` anywhere in the TUI to
+  automatically check for and install the latest binary releases directly from
+  GitHub.
 
-## Installation
+## Installation 📦
 
-### Via GitHub
+### Option 1: Install Pre-compiled Binary (Apple Silicon Mac)
 
-Since this project is currently in early development, installing directly from GitHub is the easiest method.
-
-**Option 1: Install a specific Beta release (Recommended)**
-To install a specific version that has been tagged as a release, use the `--tag` flag.
-```bash
-cargo install --git https://github.com/YOUR_USERNAME/pg-studio --tag v0.1.0-beta.1
-```
-*(To update an existing installation to a newer beta, simply append the `--force` flag).*
-
-**Option 2: Install the latest edge version (main branch)**
-If you want the absolute latest features and fixes straight from the `main` branch, omit the tag:
-```bash
-cargo install --git https://github.com/YOUR_USERNAME/pg-studio --force
-```
-
-### Via Crates.io (When published)
-
-Once published to `crates.io`, you can install the beta explicitly:
+Download and install the latest pre-compiled binary directly from
+[GitHub Releases](https://github.com/ujjwal6792/pg-studio/releases):
 
 ```bash
-cargo install pg-studio --version 0.1.0-beta.1
+curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.2.0-beta.2-aarch64-apple-darwin.tar.gz | tar -xz
+sudo mv pg-studio /usr/local/bin/
 ```
 
-*(Or simply `cargo install pg-studio` once the `1.0.0` stable release drops!)*
+### Option 2: Install via Cargo (GitHub)
+
+To build and install a specific tagged release directly via Cargo:
+
+```bash
+cargo install --git https://github.com/ujjwal6792/pg-studio --tag v0.2.0-beta.2 --force
+```
+
+Or install the latest edge version straight from the `main` branch:
+
+```bash
+cargo install --git https://github.com/ujjwal6792/pg-studio --force
+```
+
+### Option 3: Install via Crates.io (When published)
+
+```bash
+cargo install pg-studio --version 0.2.0-beta.2
+```
 
 ## Prerequisites
 
-- **Rust/Cargo**: To build and install the tool.
+- **Rust/Cargo**: To build and install the tool (if installing via Cargo).
 - **Node.js (`npm` & `npx`)**: Required under-the-hood to fetch and run
   `drizzle-kit`.
 - **SSH Client**: Standard `ssh` must be available in your terminal.
 
-## Usage
+## Usage & Navigation 💻
 
-Simply run the tool in your terminal:
+Simply run:
 
 ```bash
 pg-studio
 ```
 
-You will be greeted with an interactive prompt:
+### Keyboard Navigation in TUI:
 
-1. **SSH Connection String**: e.g., `ubuntu@192.168.1.5`
-2. **Remote Database Port**: Usually `5432` for Postgres.
-3. **Database Name**: The name of the database you want to introspect.
-4. **Database Username**: Your Postgres user.
-5. **Database Password**: Your Postgres password (masked in the terminal and
-   never saved).
-
-`pg-studio` will then:
-
-1. Establish a secure SSH tunnel in the background.
-2. Initialize an isolated workspace in your OS's data directory.
-3. Introspect your database schema.
-4. Launch Drizzle Studio in your browser on `https://local.drizzle.studio`.
-
-To cleanly exit and tear down the SSH tunnel, simply press `Ctrl+C` or exit
-Drizzle Studio.
+- **`Tab`**: Switch focus between **Projects List**, **Project Form**, and
+  **Logs**.
+- **`n`**: Create a **New Project**.
+- **`e`**: **Edit** the selected project.
+- **`d` / `Backspace`**: **Delete** the selected project (with confirmation
+  modal).
+- **`Enter`**:
+  - On Projects List: **Launch SSH Tunnel & Drizzle Studio**.
+  - On Project Form: **Save Project**.
+- **`u`**: **Self-Update** (fetches & installs the latest GitHub binary
+  release).
+- **`q` / `Esc`**: **Quit** (with confirmation modal).
 
 ## License
 
