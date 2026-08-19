@@ -2305,6 +2305,7 @@ dependencies = [
  "ctrlc",
  "directories",
  "keyring",
+ "libc",
  "ratatui",
  "regex",
  "self_update",

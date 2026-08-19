@@ -1,6 +1,8 @@
 pub mod app;
 pub mod config;
 pub mod drizzle;
+pub mod open;
+pub mod session;
 pub mod ssh;
 pub mod tui;
 pub mod ui;

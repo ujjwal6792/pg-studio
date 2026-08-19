@@ -1,4 +1,8 @@
-use crate::config::{AppConfig, ProjectConfig};
+use crate::config::{AppConfig, ConnectionType, ProjectConfig};
+use crate::drizzle::{check_dependencies, extract_tunnel_url, prepare_workspace, spawn_studio};
+use crate::open::{copy_to_clipboard, open_url};
+use crate::session::{RunningSession, SessionStatus};
+use crate::ssh::{establish_tunnel, find_free_port};
 use anyhow::{Result, anyhow};
 use chrono::{Local, TimeZone};
 use std::sync::{Arc, Mutex};
@@ -7,8 +11,22 @@ use tui_input::Input;
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ActivePane {
     ProjectsList,
-    ProjectForm,
+    Details,
     Logs,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum DetailsTab {
+    Overview,
+    Config,
+    Process,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ProjectState {
+    Running,
+    Stopped,
+    Error,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -16,7 +34,7 @@ pub enum AppMode {
     Normal,
     EditingForm,
     ConfirmDialog,
-    Running,
+    Help,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -29,7 +47,10 @@ pub enum ConfirmationAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormField {
     Name,
+    ConnectionType,
     SshConnection,
+    DbUrl,
+    DbHost,
     DbPort,
     DbName,
     DbUser,
@@ -37,45 +58,71 @@ pub enum FormField {
 }
 
 impl FormField {
-    pub fn next(&self) -> Self {
-        match self {
-            FormField::Name => FormField::SshConnection,
-            FormField::SshConnection => FormField::DbPort,
-            FormField::DbPort => FormField::DbName,
-            FormField::DbName => FormField::DbUser,
-            FormField::DbUser => FormField::DbPass,
-            FormField::DbPass => FormField::Name,
+    fn order(ct: ConnectionType) -> &'static [FormField] {
+        match ct {
+            ConnectionType::Ssh => &[
+                FormField::Name,
+                FormField::ConnectionType,
+                FormField::SshConnection,
+                FormField::DbPort,
+                FormField::DbName,
+                FormField::DbUser,
+                FormField::DbPass,
+            ],
+            ConnectionType::Url => &[
+                FormField::Name,
+                FormField::ConnectionType,
+                FormField::DbUrl,
+                FormField::DbHost,
+                FormField::DbPort,
+                FormField::DbName,
+                FormField::DbUser,
+                FormField::DbPass,
+            ],
         }
     }
 
-    pub fn prev(&self) -> Self {
-        match self {
-            FormField::Name => FormField::DbPass,
-            FormField::SshConnection => FormField::Name,
-            FormField::DbPort => FormField::SshConnection,
-            FormField::DbName => FormField::DbPort,
-            FormField::DbUser => FormField::DbName,
-            FormField::DbPass => FormField::DbUser,
-        }
+    pub fn next(&self, ct: ConnectionType) -> Self {
+        let order = Self::order(ct);
+        let idx = order.iter().position(|f| f == self).unwrap_or(0);
+        order[(idx + 1) % order.len()]
+    }
+
+    pub fn prev(&self, ct: ConnectionType) -> Self {
+        let order = Self::order(ct);
+        let idx = order.iter().position(|f| f == self).unwrap_or(0);
+        order[(idx + order.len() - 1) % order.len()]
     }
 
     pub fn get_help(&self) -> (&'static str, &'static str) {
         match self {
             FormField::Name => (
-                "Unique identifier for this project. If left blank, defaults to database_name@ssh_host.",
+                "Unique identifier for this project. If left blank, defaults to database_name@host.",
                 "Examples: production-us-east, staging-db, app_db@ubuntu@192.168.1.5",
+            ),
+            FormField::ConnectionType => (
+                "How to reach the database. SSH tunnels through a remote server; URL connects directly.",
+                "Press Enter or Space to toggle between SSH and URL.",
             ),
             FormField::SshConnection => (
                 "SSH connection string to reach the remote server hosting the Postgres database.",
                 "Examples: ubuntu@13.233.0.0, root@ec2.compute.amazonaws.com, admin@my-server.com",
             ),
+            FormField::DbUrl => (
+                "Full public connection string for a hosted database (PlanetScale, CockroachDB, etc.).",
+                "Examples: postgresql://user:pass@host:5432/db — password is moved to your keychain on save.",
+            ),
+            FormField::DbHost => (
+                "Public host for a hosted database (used only if no full Connection URL is provided).",
+                "Examples: db.your-cluster.us-east-1.cockroachlabs.cloud",
+            ),
             FormField::DbPort => (
                 "The remote port Postgres is listening on. Leave blank to default to 5432.",
-                "Examples: 5432, 5433, 6432",
+                "Examples: 5432, 5433, 6432, 26257",
             ),
             FormField::DbName => (
-                "Name of the target Postgres database on the remote server.",
-                "Examples: postgres, production_main, app_db_v2",
+                "Name of the target Postgres database.",
+                "Examples: postgres, production_main, app_db_v2, defaultdb",
             ),
             FormField::DbUser => (
                 "Postgres database user with read/introspection permissions.",
@@ -93,23 +140,27 @@ pub struct App {
     pub config: AppConfig,
     pub selected_project_idx: usize,
     pub active_pane: ActivePane,
+    pub details_tab: DetailsTab,
     pub mode: AppMode,
     pub confirm_action: Option<ConfirmationAction>,
 
     // Form inputs
     pub input_name: Input,
     pub input_ssh: Input,
+    pub input_url: Input,
+    pub input_host: Input,
     pub input_port: Input,
     pub input_dbname: Input,
     pub input_dbuser: Input,
     pub input_dbpass: Input,
+    pub connection_type: ConnectionType,
     pub active_field: FormField,
 
     pub is_new_project: bool,
     pub status_message: String,
     pub error_message: Option<String>,
     pub logs: Arc<Mutex<Vec<String>>>,
-    pub running_process: bool,
+    pub sessions: Vec<Arc<Mutex<RunningSession>>>,
 }
 
 impl App {
@@ -123,24 +174,28 @@ impl App {
             config,
             selected_project_idx: 0,
             active_pane: ActivePane::ProjectsList,
+            details_tab: DetailsTab::Overview,
             mode: AppMode::Normal,
             confirm_action: None,
 
             input_name: Input::default(),
             input_ssh: Input::default(),
+            input_url: Input::default(),
+            input_host: Input::default(),
             input_port: Input::default(),
             input_dbname: Input::default(),
             input_dbuser: Input::default(),
             input_dbpass: Input::default(),
+            connection_type: ConnectionType::Ssh,
             active_field: FormField::Name,
 
             is_new_project: false,
             status_message: String::from(
-                "Ready. Press 'n' for New Project, 'Enter' to launch selected.",
+                "Ready. Press 'n' for New Project, 'Enter' to launch selected, '?' for help.",
             ),
             error_message: None,
             logs: Arc::new(Mutex::new(Vec::new())),
-            running_process: false,
+            sessions: Vec::new(),
         };
 
         app.load_selected_into_form();
@@ -151,6 +206,14 @@ impl App {
         if let Ok(mut logs) = self.logs.lock() {
             logs.push(msg);
         }
+    }
+
+    pub fn selected_project_name(&self) -> String {
+        self.config
+            .projects
+            .get(self.selected_project_idx)
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
     }
 
     pub fn formatted_last_opened(&self) -> String {
@@ -170,7 +233,10 @@ impl App {
         self.error_message = None;
         if let Some(proj) = self.config.projects.get(self.selected_project_idx) {
             self.input_name = Input::from(proj.name.clone());
+            self.connection_type = proj.connection_type;
             self.input_ssh = Input::from(proj.ssh_connection.clone());
+            self.input_url = Input::from(proj.db_url.clone());
+            self.input_host = Input::from(proj.db_host.clone());
             self.input_port = if proj.db_port == "5432" {
                 Input::default()
             } else {
@@ -188,29 +254,43 @@ impl App {
 
     /// Fetches password from keychain ONLY when user explicitly enters edit mode
     pub fn prepare_edit_mode(&mut self) {
-        if let Some(proj) = self.config.projects.get(self.selected_project_idx) {
-            if let Ok(pass) = proj.get_password() {
-                self.input_dbpass = Input::from(pass);
-            }
+        if let Some(proj) = self.config.projects.get(self.selected_project_idx)
+            && let Ok(pass) = proj.get_password()
+        {
+            self.input_dbpass = Input::from(pass);
         }
-        self.active_pane = ActivePane::ProjectForm;
+        self.active_pane = ActivePane::Details;
+        self.details_tab = DetailsTab::Config;
         self.mode = AppMode::EditingForm;
+    }
+
+    pub fn toggle_connection_type(&mut self) {
+        self.connection_type = match self.connection_type {
+            ConnectionType::Ssh => ConnectionType::Url,
+            ConnectionType::Url => ConnectionType::Ssh,
+        };
+        self.active_field = FormField::ConnectionType;
     }
 
     pub fn reset_form(&mut self) {
         self.error_message = None;
         self.input_name = Input::default();
         self.input_ssh = Input::default();
+        self.input_url = Input::default();
+        self.input_host = Input::default();
         self.input_port = Input::default();
         self.input_dbname = Input::default();
         self.input_dbuser = Input::default();
         self.input_dbpass = Input::default();
+        self.connection_type = ConnectionType::Ssh;
         self.active_field = FormField::Name;
         self.is_new_project = true;
     }
 
     pub fn save_form_to_project(&mut self) -> Result<()> {
         let ssh = self.input_ssh.value().to_string();
+        let db_url_input = self.input_url.value().trim().to_string();
+        let db_host = self.input_host.value().trim().to_string();
         let port = self.input_port.value().to_string();
         let dbname = self.input_dbname.value().to_string();
         let dbuser = self.input_dbuser.value().to_string();
@@ -224,20 +304,42 @@ impl App {
 
         let mut name = self.input_name.value().trim().to_string();
         if name.is_empty() {
-            name = format!("{}@{}", dbname, ssh);
+            let host = match self.connection_type {
+                ConnectionType::Ssh => ssh.clone(),
+                ConnectionType::Url => {
+                    if db_host.is_empty() {
+                        dbname.clone()
+                    } else {
+                        db_host.clone()
+                    }
+                }
+            };
+            name = format!("{}@{}", dbname, host);
         }
 
         let existing_match = self.config.projects.iter().position(|p| p.name == name);
-        if let Some(matching_idx) = existing_match {
-            if self.is_new_project || matching_idx != self.selected_project_idx {
-                self.error_message = Some(format!("A project named '{}' already exists!", name));
-                return Err(anyhow!("Project name must be unique"));
-            }
+        if let Some(matching_idx) = existing_match
+            && (self.is_new_project || matching_idx != self.selected_project_idx)
+        {
+            self.error_message = Some(format!("A project named '{}' already exists!", name));
+            return Err(anyhow!("Project name must be unique"));
         }
+
+        // In URL mode, pull any embedded password out of the URL into the keychain.
+        let (db_url, extracted_pass) =
+            if self.connection_type == ConnectionType::Url && !db_url_input.is_empty() {
+                let (redacted, pass) = ProjectConfig::redact_url_password(&db_url_input);
+                (redacted, pass)
+            } else {
+                (db_url_input, None)
+            };
 
         let proj = ProjectConfig {
             name: name.clone(),
+            connection_type: self.connection_type,
             ssh_connection: ssh,
+            db_url,
+            db_host,
             db_port: final_port,
             db_name: dbname,
             db_user: dbuser,
@@ -247,8 +349,9 @@ impl App {
                 .as_secs() as i64,
         };
 
-        if !dbpass.is_empty() {
-            proj.save_password(&dbpass)?;
+        let pass_to_save = extracted_pass.unwrap_or(dbpass);
+        if !pass_to_save.is_empty() {
+            proj.save_password(&pass_to_save)?;
         }
 
         if self.is_new_project {
@@ -270,6 +373,7 @@ impl App {
             && self.selected_project_idx < self.config.projects.len()
         {
             let removed = self.config.projects.remove(self.selected_project_idx);
+            self.stop_session_for(&removed.name);
             self.config.save()?;
             if self.selected_project_idx >= self.config.projects.len()
                 && self.selected_project_idx > 0
@@ -281,4 +385,396 @@ impl App {
         }
         Ok(())
     }
+
+    // --- Navigation ---
+
+    pub fn cycle_pane(&mut self, forward: bool) {
+        self.active_pane = match (self.active_pane, forward) {
+            (ActivePane::ProjectsList, true) => ActivePane::Details,
+            (ActivePane::Details, true) => ActivePane::Logs,
+            (ActivePane::Logs, true) => ActivePane::ProjectsList,
+            (ActivePane::ProjectsList, false) => ActivePane::Logs,
+            (ActivePane::Details, false) => ActivePane::ProjectsList,
+            (ActivePane::Logs, false) => ActivePane::Details,
+        };
+    }
+
+    pub fn cycle_details_tab(&mut self, forward: bool) {
+        self.details_tab = match (self.details_tab, forward) {
+            (DetailsTab::Overview, true) => DetailsTab::Config,
+            (DetailsTab::Config, true) => DetailsTab::Process,
+            (DetailsTab::Process, true) => DetailsTab::Overview,
+            (DetailsTab::Overview, false) => DetailsTab::Process,
+            (DetailsTab::Config, false) => DetailsTab::Overview,
+            (DetailsTab::Process, false) => DetailsTab::Config,
+        };
+    }
+
+    // --- Sessions ---
+
+    pub fn session_for(&self, name: &str) -> Option<Arc<Mutex<RunningSession>>> {
+        self.sessions
+            .iter()
+            .find(|s| s.lock().map(|g| g.project_name == name).unwrap_or(false))
+            .cloned()
+    }
+
+    pub fn selected_session(&self) -> Option<Arc<Mutex<RunningSession>>> {
+        self.session_for(&self.selected_project_name())
+    }
+
+    pub fn selected_url(&self) -> Option<String> {
+        let session = self.selected_session()?;
+        let s = session.lock().ok()?;
+        s.url().map(|u| u.to_string())
+    }
+
+    pub fn is_project_running(&self, name: &str) -> bool {
+        self.sessions.iter().any(|s| {
+            s.lock()
+                .map(|g| {
+                    g.project_name == name
+                        && matches!(
+                            g.status,
+                            SessionStatus::Starting
+                                | SessionStatus::Pulling
+                                | SessionStatus::Running
+                        )
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn project_state(&self, name: &str) -> Option<ProjectState> {
+        let session = self.session_for(name)?;
+        let s = session.lock().ok()?;
+        Some(match s.status {
+            SessionStatus::Starting | SessionStatus::Pulling | SessionStatus::Running => {
+                ProjectState::Running
+            }
+            SessionStatus::Error => ProjectState::Error,
+            SessionStatus::Stopped => ProjectState::Stopped,
+        })
+    }
+
+    pub fn start_selected_project(&mut self, auto_open: bool) {
+        if self.config.projects.is_empty() {
+            self.add_log("No project selected to launch.".to_string());
+            return;
+        }
+
+        let proj = self.config.projects[self.selected_project_idx].clone();
+        let name = proj.name.clone();
+
+        if let Some(session) = self.session_for(&name) {
+            let running = session
+                .lock()
+                .map(|s| {
+                    matches!(
+                        s.status,
+                        SessionStatus::Starting | SessionStatus::Pulling | SessionStatus::Running
+                    )
+                })
+                .unwrap_or(false);
+            if running {
+                self.add_log(format!("Project '{}' is already running.", name));
+                return;
+            }
+            self.stop_session_for(&name);
+        }
+
+        let studio_port = find_free_port().unwrap_or(4983);
+        let session = Arc::new(Mutex::new(RunningSession {
+            project_name: name.clone(),
+            studio_port,
+            ssh: None,
+            studio_child: None,
+            status: SessionStatus::Starting,
+            logs: Arc::new(Mutex::new(Vec::new())),
+            tunnel_url: None,
+            error: None,
+            auto_open,
+            studio_ready: false,
+        }));
+
+        self.sessions.push(session.clone());
+        self.add_log(format!("Starting project '{}'...", name));
+
+        let global_logs = self.logs.clone();
+        std::thread::spawn(move || {
+            run_session(proj, session, global_logs);
+        });
+    }
+
+    pub fn stop_selected_project(&mut self) {
+        let name = self.selected_project_name();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(session) = self.session_for(&name) {
+            if let Ok(mut s) = session.lock() {
+                s.stop();
+            }
+            self.add_log(format!("Stopped project '{}'", name));
+        } else {
+            self.add_log(format!("Project '{}' is not running.", name));
+        }
+    }
+
+    pub fn stop_session_for(&mut self, name: &str) {
+        if let Some(session) = self.session_for(name) {
+            if let Ok(mut s) = session.lock() {
+                s.stop();
+            }
+            self.sessions
+                .retain(|s| s.lock().map(|g| g.project_name != name).unwrap_or(false));
+        }
+    }
+
+    pub fn stop_all_sessions(&mut self) {
+        for s in &self.sessions {
+            if let Ok(mut g) = s.lock() {
+                g.stop();
+            }
+        }
+        self.sessions.clear();
+    }
+
+    pub fn poll_auto_open(&mut self) {
+        for session in &self.sessions {
+            let (should_open, url) = {
+                let Ok(mut s) = session.lock() else {
+                    continue;
+                };
+                if !s.auto_open || !s.studio_ready || s.status != SessionStatus::Running {
+                    continue;
+                }
+                s.auto_open = false;
+                let url = s.tunnel_url.clone().unwrap_or_else(|| {
+                    format!("https://local.drizzle.studio?port={}", s.studio_port)
+                });
+                (true, url)
+            };
+            if should_open {
+                self.add_log(format!("Opening {} in browser...", url));
+                if let Err(e) = open_url(&url) {
+                    self.add_log(format!("Failed to open URL: {:#}", e));
+                }
+            }
+        }
+    }
+
+    pub fn open_selected_url(&mut self) {
+        match self.selected_url() {
+            Some(u) => {
+                self.add_log(format!("Opening {} ...", u));
+                if let Err(e) = open_url(&u) {
+                    self.add_log(format!("Failed to open URL: {:#}", e));
+                }
+            }
+            None => self.add_log("No running session URL to open.".to_string()),
+        }
+    }
+
+    pub fn copy_selected_url(&mut self) {
+        match self.selected_url() {
+            Some(u) => {
+                if let Err(e) = copy_to_clipboard(&u) {
+                    self.add_log(format!("Failed to copy URL: {:#}", e));
+                } else {
+                    self.add_log(format!("Copied {} to clipboard.", u));
+                }
+            }
+            None => self.add_log("No running session URL to copy.".to_string()),
+        }
+    }
+}
+
+fn push_session_log(session: &Arc<Mutex<RunningSession>>, msg: String) {
+    if let Ok(s) = session.lock()
+        && let Ok(mut l) = s.logs.lock()
+    {
+        l.push(msg);
+    }
+}
+
+fn add_global_log(global: &Arc<Mutex<Vec<String>>>, msg: String) {
+    if let Ok(mut g) = global.lock() {
+        g.push(msg);
+    }
+}
+
+fn set_session_error(session: &Arc<Mutex<RunningSession>>, e: String) {
+    if let Ok(mut s) = session.lock() {
+        s.status = SessionStatus::Error;
+        s.error = Some(e);
+    }
+}
+
+fn session_cancelled(session: &Arc<Mutex<RunningSession>>) -> bool {
+    session
+        .lock()
+        .map(|s| s.status == SessionStatus::Stopped)
+        .unwrap_or(true)
+}
+
+fn run_session(
+    proj: ProjectConfig,
+    session: Arc<Mutex<RunningSession>>,
+    global_logs: Arc<Mutex<Vec<String>>>,
+) {
+    let name = proj.name.clone();
+
+    if let Err(e) = check_dependencies() {
+        push_session_log(&session, format!("Dependency check failed: {:#}", e));
+        set_session_error(&session, format!("{:#}", e));
+        add_global_log(&global_logs, format!("Project '{}' failed to start.", name));
+        return;
+    }
+
+    let studio_port = session.lock().map(|s| s.studio_port).unwrap_or(4983);
+
+    let db_url = match proj.connection_type {
+        ConnectionType::Ssh => match establish_tunnel(&proj.ssh_connection, &proj.db_port) {
+            Ok(tunnel) => {
+                let local_port = tunnel.local_port;
+                if let Ok(mut s) = session.lock() {
+                    s.ssh = Some(tunnel);
+                }
+                push_session_log(
+                    &session,
+                    format!("SSH tunnel established on local port {}", local_port),
+                );
+                let pass = proj.get_password().unwrap_or_default();
+                format!(
+                    "postgresql://{}:{}@127.0.0.1:{}/{}",
+                    proj.db_user, pass, local_port, proj.db_name
+                )
+            }
+            Err(e) => {
+                push_session_log(&session, format!("SSH Tunnel error: {:#}", e));
+                set_session_error(&session, format!("{:#}", e));
+                add_global_log(&global_logs, format!("Project '{}' failed to start.", name));
+                return;
+            }
+        },
+        ConnectionType::Url => match proj.connection_url(None) {
+            Ok(url) => url,
+            Err(e) => {
+                push_session_log(&session, format!("Connection error: {:#}", e));
+                set_session_error(&session, format!("{:#}", e));
+                add_global_log(&global_logs, format!("Project '{}' failed to start.", name));
+                return;
+            }
+        },
+    };
+
+    if let Ok(mut s) = session.lock() {
+        s.status = SessionStatus::Pulling;
+    }
+
+    let session_logs = session
+        .lock()
+        .map(|s| s.logs.clone())
+        .unwrap_or_else(|_| Arc::new(Mutex::new(Vec::new())));
+    let workspace = match prepare_workspace(&proj.name, &db_url, &session_logs) {
+        Ok(w) => w,
+        Err(e) => {
+            push_session_log(&session, format!("Workspace error: {:#}", e));
+            set_session_error(&session, format!("{:#}", e));
+            add_global_log(&global_logs, format!("Project '{}' failed to start.", name));
+            return;
+        }
+    };
+
+    if session_cancelled(&session) {
+        return;
+    }
+
+    let mut child = match spawn_studio(&workspace, &db_url, studio_port) {
+        Ok(c) => c,
+        Err(e) => {
+            push_session_log(&session, format!("Drizzle Studio error: {:#}", e));
+            set_session_error(&session, format!("{:#}", e));
+            add_global_log(&global_logs, format!("Project '{}' failed to start.", name));
+            return;
+        }
+    };
+
+    let child_stdout = child.stdout.take();
+    let child_stderr = child.stderr.take();
+
+    {
+        let mut s = session.lock().unwrap();
+        s.studio_child = Some(child);
+        s.status = SessionStatus::Running;
+        s.tunnel_url = Some(format!("https://local.drizzle.studio?port={}", studio_port));
+    }
+
+    if session_cancelled(&session) {
+        if let Ok(mut s) = session.lock() {
+            s.stop();
+        }
+        return;
+    }
+
+    if let Some(out) = child_stdout {
+        let session_clone = session.clone();
+        let global_clone = global_logs.clone();
+        let project_name = name.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(out);
+            for line in reader.lines().map_while(|l| l.ok()) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(s) = session_clone.lock()
+                    && let Ok(mut l) = s.logs.lock()
+                {
+                    l.push(line.clone());
+                }
+                if let Some(url) = extract_tunnel_url(&line)
+                    && let Ok(mut s) = session_clone.lock()
+                {
+                    s.tunnel_url = Some(url);
+                    s.studio_ready = true;
+                }
+            }
+            // stdout closed => the studio process has exited.
+            if let Ok(mut s) = session_clone.lock()
+                && s.status == SessionStatus::Running
+            {
+                s.status = SessionStatus::Stopped;
+            }
+            add_global_log(&global_clone, format!("Project '{}' exited.", project_name));
+        });
+    }
+
+    if let Some(err) = child_stderr {
+        let session_clone = session.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(err);
+            for line in reader.lines().map_while(|l| l.ok()) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(s) = session_clone.lock()
+                    && let Ok(mut l) = s.logs.lock()
+                {
+                    l.push(line);
+                }
+            }
+        });
+    }
+
+    push_session_log(
+        &session,
+        format!(
+            "Drizzle Studio running at https://local.drizzle.studio?port={}",
+            studio_port
+        ),
+    );
+    add_global_log(&global_logs, format!("Project '{}' is running.", name));
 }

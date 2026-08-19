@@ -13,6 +13,7 @@ crossterm = "0.29.0"
 ctrlc = "3.5.2"
 directories = "6.0.0"
 keyring = "4.1.6"
+libc = "0.2"
 ratatui = "0.30.2"
 regex = "1.13.1"
 self_update = { version = "0.44.0", features = [
