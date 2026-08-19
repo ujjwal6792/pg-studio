@@ -1,8 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use pg_studio::{
     app::{ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField},
+    theme,
     tui::Tui,
     ui::draw,
     updater::{check_for_update, update_cli},
@@ -64,11 +65,13 @@ fn main() -> Result<()> {
     let mut tui = Tui::new()?;
     tui.enter()?;
 
+    app.theme = theme::query_terminal_theme().unwrap_or_default();
+
     let res = run_app(&mut tui, &mut app);
 
     tui.exit()?;
 
-    app.stop_all_sessions();
+    app.shutdown();
 
     if let Err(err) = res {
         eprintln!("Error: {:?}", err);
@@ -85,6 +88,9 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
         {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             match app.mode {
                 AppMode::Normal => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
@@ -169,11 +175,17 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                             app.start_selected_project(true);
                         }
                     }
-                    KeyCode::Char('r') => {
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
                         app.start_selected_project(false);
                     }
                     KeyCode::Char('s') => {
-                        app.stop_selected_project();
+                        let name = app.selected_project_name();
+                        if !name.is_empty() && app.session_for(&name).is_some() {
+                            app.confirm_action = Some(ConfirmationAction::StopProject);
+                            app.mode = AppMode::ConfirmDialog;
+                        } else {
+                            app.stop_selected_project();
+                        }
                     }
                     KeyCode::Char('o') => {
                         app.open_selected_url();
@@ -229,7 +241,6 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                     KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                         match app.confirm_action {
                             Some(ConfirmationAction::Quit) => {
-                                app.stop_all_sessions();
                                 return Ok(());
                             }
                             Some(ConfirmationAction::DeleteProject) => {
@@ -239,6 +250,11 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                             }
                             Some(ConfirmationAction::CancelEdit) => {
                                 app.load_selected_into_form();
+                                app.confirm_action = None;
+                                app.mode = AppMode::Normal;
+                            }
+                            Some(ConfirmationAction::StopProject) => {
+                                app.stop_selected_project();
                                 app.confirm_action = None;
                                 app.mode = AppMode::Normal;
                             }

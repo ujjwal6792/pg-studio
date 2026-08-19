@@ -2310,6 +2310,7 @@ dependencies = [
  "regex",
  "self_update",
  "serde",
+ "serde_json",
  "toml",
  "tui-input",
  "which",

@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -38,34 +38,34 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.mode == AppMode::ConfirmDialog
         && let Some(action) = app.confirm_action
     {
-        render_confirm_popup(f, action);
+        render_confirm_popup(f, app, action);
     }
     if app.mode == AppMode::Help {
-        render_help_popup(f);
+        render_help_popup(f, app);
     }
 }
 
-fn draw_header(f: &mut Frame, _app: &App, area: Rect) {
+fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let header = Paragraph::new("").block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(Style::default().fg(app.theme.muted))
             .title(Line::from(vec![
                 Span::styled(
                     " PG-STUDIO ",
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(app.theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     " | Remote & Hosted Postgres Drizzle Studio Launcher",
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(app.theme.dim),
                 ),
             ]))
             .title(
                 Line::from(vec![Span::styled(
                     format!(" v{} ", env!("CARGO_PKG_VERSION")),
-                    Style::default().fg(Color::Magenta),
+                    Style::default().fg(app.theme.info),
                 )])
                 .right_aligned(),
             ),
@@ -74,10 +74,12 @@ fn draw_header(f: &mut Frame, _app: &App, area: Rect) {
 }
 
 fn draw_projects_list(f: &mut Frame, app: &App, area: Rect) {
-    let items: Vec<ListItem> = if app.config.projects.is_empty() {
-        vec![ListItem::new(Span::styled(
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let lines: Vec<Line> = if app.config.projects.is_empty() {
+        vec![Line::from(Span::styled(
             "No projects yet. Press 'n' to add.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.muted),
         ))]
     } else {
         app.config
@@ -86,62 +88,84 @@ fn draw_projects_list(f: &mut Frame, app: &App, area: Rect) {
             .enumerate()
             .map(|(i, p)| {
                 let state = app.project_state(&p.name);
-                let selected =
-                    i == app.selected_project_idx && app.active_pane == ActivePane::ProjectsList;
-                let name_style = if selected {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else if i == app.selected_project_idx {
-                    Style::default().fg(Color::Cyan)
+                let selected = i == app.selected_project_idx;
+                let focused = app.active_pane == ActivePane::ProjectsList;
+
+                let (marker, marker_color) = match state {
+                    Some(ProjectState::Running) => ("●", app.theme.success),
+                    Some(ProjectState::Error) => ("●", app.theme.error),
+                    Some(ProjectState::Stopped) => ("○", app.theme.muted),
+                    None => ("•", app.theme.muted),
+                };
+
+                let name_color = if selected {
+                    app.theme.text
                 } else {
                     match state {
-                        Some(ProjectState::Running) => Style::default().fg(Color::Green),
-                        Some(ProjectState::Error) => Style::default().fg(Color::Red),
-                        Some(ProjectState::Stopped) => Style::default().fg(Color::DarkGray),
-                        None => Style::default().fg(Color::White),
+                        Some(ProjectState::Running) => app.theme.success,
+                        Some(ProjectState::Error) => app.theme.error,
+                        Some(ProjectState::Stopped) => app.theme.muted,
+                        None => app.theme.text,
                     }
                 };
-                let marker = match state {
-                    Some(ProjectState::Running) => {
-                        Span::styled("● ", Style::default().fg(Color::Green))
+
+                let bg = if selected {
+                    if focused {
+                        app.theme.highlight_bg
+                    } else {
+                        app.theme.muted
                     }
-                    Some(ProjectState::Error) => {
-                        Span::styled("● ", Style::default().fg(Color::Red))
-                    }
-                    Some(ProjectState::Stopped) => {
-                        Span::styled("○ ", Style::default().fg(Color::DarkGray))
-                    }
-                    None => Span::styled("• ", name_style),
+                } else {
+                    Color::Reset
                 };
-                ListItem::new(Line::from(vec![
-                    marker,
-                    Span::styled(p.name.clone(), name_style),
-                ]))
+
+                let icon = match p.connection_type {
+                    ConnectionType::Ssh => "󰒋",
+                    ConnectionType::Url => "󰖟",
+                };
+
+                let bold = if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                };
+
+                let marker_span = Span::styled(
+                    format!(" {} ", marker),
+                    Style::default().fg(marker_color).bg(bg),
+                );
+                let name_text = format!("{} {} ", icon, p.name);
+                let name_span = Span::styled(
+                    name_text,
+                    Style::default().fg(name_color).bg(bg).add_modifier(bold),
+                );
+                let pad = inner_width.saturating_sub(3 + 1 + 1 + p.name.chars().count());
+                let pad_span = Span::styled(" ".repeat(pad), Style::default().bg(bg));
+                Line::from(vec![marker_span, name_span, pad_span])
             })
             .collect()
     };
 
     let list_border_style = if app.active_pane == ActivePane::ProjectsList {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(app.theme.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(app.theme.muted)
     };
 
-    let projects_list = List::new(items).block(
-        Block::default()
-            .title(" Projects ")
-            .borders(Borders::ALL)
-            .border_style(list_border_style),
-    );
-    f.render_widget(projects_list, area);
+    let projects_block = Block::default()
+        .title(" 󰍉 Projects ")
+        .borders(Borders::ALL)
+        .border_style(list_border_style);
+    let inner = projects_block.inner(area);
+    f.render_widget(projects_block, area);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_details(f: &mut Frame, app: &App, area: Rect) {
     let border_style = if app.active_pane == ActivePane::Details {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(app.theme.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(app.theme.muted)
     };
 
     let block = Block::default()
@@ -153,7 +177,7 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(inner);
 
     draw_details_subtabs(f, app, chunks[0]);
@@ -166,25 +190,45 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_details_subtabs(f: &mut Frame, app: &App, area: Rect) {
-    let tabs = [
-        ("Overview", DetailsTab::Overview),
-        ("Config", DetailsTab::Config),
-        ("Process", DetailsTab::Process),
+    let tabs: [(&str, DetailsTab); 3] = [
+        ("󰍉 Overview", DetailsTab::Overview),
+        ("󰒓 Config", DetailsTab::Config),
+        ("󰐊 Process", DetailsTab::Process),
     ];
-    let mut spans: Vec<Span> = Vec::new();
-    for (label, tab) in tabs {
-        let active = app.active_pane == ActivePane::Details && app.details_tab == tab;
-        let style = if active {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Magenta)
-                .add_modifier(Modifier::BOLD)
+    let widths: [Constraint; 3] = [
+        Constraint::Length(15),
+        Constraint::Length(13),
+        Constraint::Length(14),
+    ];
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(widths)
+        .split(area);
+
+    for (i, (label, tab)) in tabs.iter().enumerate() {
+        let active = app.details_tab == *tab;
+        let (text_style, border_style) = if active {
+            (
+                Style::default()
+                    .fg(app.theme.text)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(app.theme.accent),
+            )
         } else {
-            Style::default().fg(Color::Gray)
+            (
+                Style::default().fg(app.theme.dim),
+                Style::default().fg(app.theme.muted),
+            )
         };
-        spans.push(Span::styled(format!(" {label} "), style));
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let inner = block.inner(chunks[i]);
+        f.render_widget(block, chunks[i]);
+        let tab_widget = Paragraph::new(Span::styled(*label, text_style))
+            .alignment(Alignment::Center);
+        f.render_widget(tab_widget, inner);
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
@@ -192,7 +236,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 "No project selected.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme.muted),
             )),
             area,
         );
@@ -203,7 +247,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             format!(" Name              : {}", proj.name),
-            Style::default().fg(Color::White),
+            Style::default().fg(app.theme.text),
         )),
         Line::from(Span::styled(
             format!(
@@ -213,7 +257,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
                     ConnectionType::Url => "Public URL",
                 }
             ),
-            Style::default().fg(Color::White),
+            Style::default().fg(app.theme.text),
         )),
     ];
 
@@ -221,27 +265,27 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
         ConnectionType::Ssh => {
             lines.push(Line::from(Span::styled(
                 format!(" SSH               : {}", proj.ssh_connection),
-                Style::default().fg(Color::White),
+                Style::default().fg(app.theme.text),
             )));
             lines.push(Line::from(Span::styled(
                 format!(" Remote Port       : {}", proj.db_port),
-                Style::default().fg(Color::White),
+                Style::default().fg(app.theme.text),
             )));
         }
         ConnectionType::Url => {
             if !proj.db_url.is_empty() {
                 lines.push(Line::from(Span::styled(
                     format!(" URL               : {}", proj.db_url),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(app.theme.text),
                 )));
             } else {
                 lines.push(Line::from(Span::styled(
                     format!(" Host              : {}", proj.db_host),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(app.theme.text),
                 )));
                 lines.push(Line::from(Span::styled(
                     format!(" Port              : {}", proj.db_port),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(app.theme.text),
                 )));
             }
         }
@@ -249,15 +293,15 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
 
     lines.push(Line::from(Span::styled(
         format!(" Database          : {}", proj.db_name),
-        Style::default().fg(Color::White),
+        Style::default().fg(app.theme.text),
     )));
     lines.push(Line::from(Span::styled(
         format!(" User              : {}", proj.db_user),
-        Style::default().fg(Color::White),
+        Style::default().fg(app.theme.text),
     )));
     lines.push(Line::from(Span::styled(
         format!(" Last Opened       : {}", app.formatted_last_opened()),
-        Style::default().fg(Color::Magenta),
+        Style::default().fg(app.theme.info),
     )));
 
     let running = app.is_project_running(&proj.name);
@@ -265,13 +309,13 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(
             " Status            : ● Running",
             Style::default()
-                .fg(Color::Green)
+                .fg(app.theme.success)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
             " Status            : ○ Stopped",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.muted),
         )
     };
     lines.push(Line::from(status_line));
@@ -371,34 +415,34 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
                 (
                     "5432 (default)".to_string(),
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(app.theme.text)
+                        .bg(app.theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
                 (
                     "5432 (default)".to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.muted),
                 )
             }
         } else if *is_pass {
             if value.is_empty() && !app.is_new_project && app.mode != AppMode::EditingForm {
                 (
                     "•••••••• (Stored in Keychain)".to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.muted),
                 )
             } else if value.is_empty() {
-                ("".to_string(), Style::default().fg(Color::White))
+                ("".to_string(), Style::default().fg(app.theme.text))
             } else {
                 (
                     "*".repeat(value.len()),
                     if is_active {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(app.theme.text)
+                            .bg(app.theme.accent)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::White)
+                        Style::default().fg(app.theme.text)
                     },
                 )
             }
@@ -407,27 +451,27 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
                 value.to_string(),
                 if is_active {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(app.theme.text)
+                        .bg(app.theme.accent)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(app.theme.text)
                 },
             )
         };
 
         let label_style = if is_active {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(app.theme.dim)
         };
 
         let prefix_indicator = if is_active { " ▶ " } else { "   " };
 
         let line = Line::from(vec![
-            Span::styled(prefix_indicator, Style::default().fg(Color::Cyan)),
+            Span::styled(prefix_indicator, Style::default().fg(app.theme.accent)),
             Span::styled(format!("{:<16}: ", label), label_style),
             Span::styled(display_val, val_style),
         ]);
@@ -439,8 +483,8 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
     if chunks.len() > n {
         let last_opened_str = app.formatted_last_opened();
         let date_line = Line::from(vec![
-            Span::styled("   Last Opened    : ", Style::default().fg(Color::DarkGray)),
-            Span::styled(last_opened_str, Style::default().fg(Color::Magenta)),
+            Span::styled("   Last Opened    : ", Style::default().fg(app.theme.muted)),
+            Span::styled(last_opened_str, Style::default().fg(app.theme.info)),
         ]);
         f.render_widget(Paragraph::new(date_line), chunks[n]);
     }
@@ -452,9 +496,11 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
         let err_line = Line::from(vec![
             Span::styled(
                 "   ⚠️ Error: ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(app.theme.error)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(err_msg, Style::default().fg(Color::LightRed)),
+            Span::styled(err_msg, Style::default().fg(app.theme.error)),
         ]);
         f.render_widget(Paragraph::new(err_line), chunks[n + 1]);
     }
@@ -466,13 +512,13 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
     if app.sessions.is_empty() {
         lines.push(Line::from(Span::styled(
             "No running studios. Press Enter to launch+open, or Shift+Enter / r to just launch.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.muted),
         )));
     } else {
         lines.push(Line::from(Span::styled(
             " Sessions ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
         let selected_name = app.selected_project_name();
@@ -481,18 +527,18 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
                 let selected = s.project_name == selected_name;
                 let marker = if selected { "▶" } else { " " };
                 let (status_text, color) = match s.status {
-                    SessionStatus::Starting => ("starting", Color::Yellow),
-                    SessionStatus::Pulling => ("pulling", Color::Yellow),
-                    SessionStatus::Running => ("running", Color::Green),
-                    SessionStatus::Error => ("error", Color::Red),
-                    SessionStatus::Stopped => ("stopped", Color::DarkGray),
+                    SessionStatus::Starting => ("starting", app.theme.warn),
+                    SessionStatus::Pulling => ("pulling", app.theme.warn),
+                    SessionStatus::Running => ("running", app.theme.success),
+                    SessionStatus::Error => ("error", app.theme.error),
+                    SessionStatus::Stopped => ("stopped", app.theme.muted),
                 };
                 let name_style = if selected {
                     Style::default()
-                        .fg(Color::White)
+                        .fg(app.theme.text)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(app.theme.text)
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!(" {} {} ", marker, s.project_name), name_style),
@@ -504,7 +550,7 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
                         Span::styled(
                             url,
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(app.theme.accent)
                                 .add_modifier(Modifier::UNDERLINED),
                         ),
                     ]));
@@ -512,7 +558,7 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
                 if let Some(err) = s.error.clone() {
                     lines.push(Line::from(Span::styled(
                         format!("     error: {}", err),
-                        Style::default().fg(Color::LightRed),
+                        Style::default().fg(app.theme.error),
                     )));
                 }
             }
@@ -527,7 +573,7 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(Span::styled(
                 " Logs (selected project) ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
             )));
             let used = lines.len() as u16;
@@ -546,7 +592,7 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
             for l in &logs[start..] {
                 lines.push(Line::from(Span::styled(
                     l.clone(),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(app.theme.dim),
                 )));
             }
         }
@@ -557,9 +603,9 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     let log_border_style = if app.active_pane == ActivePane::Logs {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(app.theme.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(app.theme.muted)
     };
 
     let (bottom_title, bottom_content) = match app.mode {
@@ -617,28 +663,37 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Help => " [Esc/?/q] Close Help",
     };
 
-    let footer = Paragraph::new(Span::styled(help_text, Style::default().fg(Color::Yellow)));
+    let footer = Paragraph::new(Span::styled(help_text, Style::default().fg(app.theme.warn)));
     f.render_widget(footer, area);
 }
 
-fn render_confirm_popup(f: &mut Frame, action: ConfirmationAction) {
+fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
     let area = centered_rect(60, 25, f.area());
 
     let (title, prompt, theme_color) = match action {
         ConfirmationAction::DeleteProject => (
             " Delete Project ",
-            "Are you sure you want to delete this project?",
-            Color::Red,
+            "Are you sure you want to delete this project?".to_string(),
+            app.theme.error,
         ),
         ConfirmationAction::CancelEdit => (
             " Discard Changes ",
-            "Are you sure you want to discard unsaved changes?",
-            Color::Yellow,
+            "Are you sure you want to discard unsaved changes?".to_string(),
+            app.theme.warn,
         ),
         ConfirmationAction::Quit => (
             " Exit pg-studio ",
-            "Are you sure you want to exit pg-studio? Running studios will be stopped.",
-            Color::Cyan,
+            "Are you sure you want to exit pg-studio? Running studios will keep running in the background."
+                .to_string(),
+            app.theme.accent,
+        ),
+        ConfirmationAction::StopProject => (
+            " Stop Project ",
+            format!(
+                "Are you sure you want to stop the studio for project '{}'?",
+                app.selected_project_name()
+            ),
+            app.theme.warn,
         ),
     };
 
@@ -647,7 +702,7 @@ fn render_confirm_popup(f: &mut Frame, action: ConfirmationAction) {
         Line::from(Span::styled(
             prompt,
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.text)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -655,15 +710,17 @@ fn render_confirm_popup(f: &mut Frame, action: ConfirmationAction) {
             Span::styled(
                 " ⏎ ",
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(app.theme.success)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Confirm        ", Style::default().fg(Color::Gray)),
+            Span::styled("Confirm        ", Style::default().fg(app.theme.dim)),
             Span::styled(
                 " ⎋ ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(app.theme.error)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Cancel  ", Style::default().fg(Color::Gray)),
+            Span::styled("Cancel  ", Style::default().fg(app.theme.dim)),
         ]),
     ];
 
@@ -687,7 +744,7 @@ fn render_confirm_popup(f: &mut Frame, action: ConfirmationAction) {
     f.render_widget(paragraph, area);
 }
 
-fn render_help_popup(f: &mut Frame) {
+fn render_help_popup(f: &mut Frame, app: &App) {
     let area = centered_rect(80, 92, f.area());
 
     let groups: &[(&str, &[(&str, &str)])] = &[
@@ -753,13 +810,16 @@ fn render_help_popup(f: &mut Frame) {
         lines.push(Line::from(Span::styled(
             format!(" {} ", group),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
         for (key, desc) in *entries {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<16}", key), Style::default().fg(Color::Yellow)),
-                Span::styled(*desc, Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("  {:<16}", key),
+                    Style::default().fg(app.theme.warn),
+                ),
+                Span::styled(*desc, Style::default().fg(app.theme.text)),
             ]));
         }
         lines.push(Line::from(""));
@@ -769,7 +829,7 @@ fn render_help_popup(f: &mut Frame) {
         .title(" Keybindings ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(app.theme.accent));
 
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);

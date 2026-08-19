@@ -1,10 +1,13 @@
 use crate::config::{AppConfig, ConnectionType, ProjectConfig};
 use crate::drizzle::{check_dependencies, extract_tunnel_url, prepare_workspace, spawn_studio};
 use crate::open::{copy_to_clipboard, open_url};
+use crate::persist::{self, PersistedSession};
 use crate::session::{RunningSession, SessionStatus};
 use crate::ssh::{establish_tunnel, find_free_port};
+use crate::theme::Theme;
 use anyhow::{Result, anyhow};
 use chrono::{Local, TimeZone};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tui_input::Input;
 
@@ -42,6 +45,7 @@ pub enum ConfirmationAction {
     DeleteProject,
     CancelEdit,
     Quit,
+    StopProject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +165,7 @@ pub struct App {
     pub error_message: Option<String>,
     pub logs: Arc<Mutex<Vec<String>>>,
     pub sessions: Vec<Arc<Mutex<RunningSession>>>,
+    pub theme: Theme,
 }
 
 impl App {
@@ -196,9 +201,11 @@ impl App {
             error_message: None,
             logs: Arc::new(Mutex::new(Vec::new())),
             sessions: Vec::new(),
+            theme: Theme::default(),
         };
 
         app.load_selected_into_form();
+        app.restore_sessions();
         Ok(app)
     }
 
@@ -495,6 +502,9 @@ impl App {
             error: None,
             auto_open,
             studio_ready: false,
+            studio_pid: None,
+            ssh_pid: None,
+            log_path: None,
         }));
 
         self.sessions.push(session.clone());
@@ -561,6 +571,100 @@ impl App {
                     self.add_log(format!("Failed to open URL: {:#}", e));
                 }
             }
+        }
+    }
+
+    fn restore_sessions(&mut self) {
+        let entries = persist::load();
+        let mut kept: Vec<PersistedSession> = Vec::new();
+        for entry in entries {
+            let project_exists = self
+                .config
+                .projects
+                .iter()
+                .any(|p| p.name == entry.project_name);
+            if !project_exists {
+                kill_detached(&entry);
+                continue;
+            }
+            if port_in_use(entry.studio_port) {
+                let log_path = PathBuf::from(&entry.log_path);
+                let logs = tail_lines(&log_path, 50);
+                let offset = file_len(&log_path);
+                let session = Arc::new(Mutex::new(RunningSession {
+                    project_name: entry.project_name.clone(),
+                    studio_port: entry.studio_port,
+                    ssh: None,
+                    studio_child: None,
+                    status: SessionStatus::Running,
+                    logs: Arc::new(Mutex::new(logs)),
+                    tunnel_url: Some(entry.tunnel_url.clone()),
+                    error: None,
+                    auto_open: false,
+                    studio_ready: true,
+                    studio_pid: Some(entry.studio_pid),
+                    ssh_pid: entry.ssh_pid,
+                    log_path: Some(log_path.clone()),
+                }));
+                let session_clone = session.clone();
+                let global = self.logs.clone();
+                std::thread::spawn(move || {
+                    tail_session_log(session_clone, global, log_path, offset);
+                });
+                self.sessions.push(session);
+                self.add_log(format!(
+                    "Restored running session for project '{}'.",
+                    entry.project_name
+                ));
+                kept.push(entry);
+            } else {
+                kill_detached(&entry);
+            }
+        }
+        let _ = persist::save(&kept);
+    }
+
+    pub fn shutdown(&mut self) {
+        #[cfg(not(unix))]
+        {
+            self.stop_all_sessions();
+            return;
+        }
+        #[cfg(unix)]
+        {
+            let mut persisted: Vec<PersistedSession> = Vec::new();
+            for session in &self.sessions {
+                let Ok(mut s) = session.lock() else {
+                    continue;
+                };
+                if s.status == SessionStatus::Running && s.studio_pid.is_some() {
+                    if let Some(log_path) = &s.log_path {
+                        let url = s.tunnel_url.clone().unwrap_or_else(|| {
+                            format!("https://local.drizzle.studio?port={}", s.studio_port)
+                        });
+                        let pid = s.studio_pid.unwrap();
+                        let ssh_pid = s.ssh.as_ref().map(|t| t.child.id()).or(s.ssh_pid);
+                        persisted.push(PersistedSession {
+                            project_name: s.project_name.clone(),
+                            studio_port: s.studio_port,
+                            studio_pid: pid,
+                            studio_pgid: pid,
+                            ssh_pid,
+                            tunnel_url: url,
+                            log_path: log_path.to_string_lossy().to_string(),
+                        });
+                        // Detach: forget the tunnel so its Drop doesn't kill ssh.
+                        let tunnel = s.ssh.take();
+                        std::mem::forget(tunnel);
+                        // Drop the child handle without killing it (Child has no
+                        // kill-on-drop; the process is reparented and kept alive).
+                        s.studio_child = None;
+                    }
+                } else {
+                    s.stop();
+                }
+            }
+            let _ = persist::save(&persisted);
         }
     }
 
@@ -639,6 +743,7 @@ fn run_session(
             Ok(tunnel) => {
                 let local_port = tunnel.local_port;
                 if let Ok(mut s) = session.lock() {
+                    s.ssh_pid = Some(tunnel.child.id());
                     s.ssh = Some(tunnel);
                 }
                 push_session_log(
@@ -691,7 +796,8 @@ fn run_session(
         return;
     }
 
-    let mut child = match spawn_studio(&workspace, &db_url, studio_port) {
+    let log_path = workspace.join("studio.log");
+    let child = match spawn_studio(&workspace, &db_url, studio_port, &log_path) {
         Ok(c) => c,
         Err(e) => {
             push_session_log(&session, format!("Drizzle Studio error: {:#}", e));
@@ -701,12 +807,13 @@ fn run_session(
         }
     };
 
-    let child_stdout = child.stdout.take();
-    let child_stderr = child.stderr.take();
+    let studio_pid = child.id();
 
     {
         let mut s = session.lock().unwrap();
         s.studio_child = Some(child);
+        s.studio_pid = Some(studio_pid);
+        s.log_path = Some(log_path.clone());
         s.status = SessionStatus::Running;
         s.tunnel_url = Some(format!("https://local.drizzle.studio?port={}", studio_port));
     }
@@ -718,54 +825,11 @@ fn run_session(
         return;
     }
 
-    if let Some(out) = child_stdout {
+    {
         let session_clone = session.clone();
         let global_clone = global_logs.clone();
-        let project_name = name.clone();
         std::thread::spawn(move || {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(out);
-            for line in reader.lines().map_while(|l| l.ok()) {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(s) = session_clone.lock()
-                    && let Ok(mut l) = s.logs.lock()
-                {
-                    l.push(line.clone());
-                }
-                if let Some(url) = extract_tunnel_url(&line)
-                    && let Ok(mut s) = session_clone.lock()
-                {
-                    s.tunnel_url = Some(url);
-                    s.studio_ready = true;
-                }
-            }
-            // stdout closed => the studio process has exited.
-            if let Ok(mut s) = session_clone.lock()
-                && s.status == SessionStatus::Running
-            {
-                s.status = SessionStatus::Stopped;
-            }
-            add_global_log(&global_clone, format!("Project '{}' exited.", project_name));
-        });
-    }
-
-    if let Some(err) = child_stderr {
-        let session_clone = session.clone();
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(err);
-            for line in reader.lines().map_while(|l| l.ok()) {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(s) = session_clone.lock()
-                    && let Ok(mut l) = s.logs.lock()
-                {
-                    l.push(line);
-                }
-            }
+            tail_session_log(session_clone, global_clone, log_path, 0);
         });
     }
 
@@ -777,4 +841,122 @@ fn run_session(
         ),
     );
     add_global_log(&global_logs, format!("Project '{}' is running.", name));
+}
+
+fn port_in_use(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+fn file_len(path: &PathBuf) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn tail_lines(path: &PathBuf, count: usize) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(count);
+    lines[start..].iter().map(|s| s.to_string()).collect()
+}
+
+#[cfg(unix)]
+fn kill_detached(entry: &PersistedSession) {
+    unsafe {
+        libc::kill(-(entry.studio_pgid as i32), libc::SIGKILL);
+        libc::kill(entry.studio_pid as i32, libc::SIGKILL);
+        if let Some(pid) = entry.ssh_pid {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_detached(_entry: &PersistedSession) {}
+
+fn tail_session_log(
+    session: Arc<Mutex<RunningSession>>,
+    global: Arc<Mutex<Vec<String>>>,
+    log_path: PathBuf,
+    start_offset: u64,
+) {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match std::fs::File::open(&log_path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    if file.seek(SeekFrom::Start(start_offset)).is_err() {
+        return;
+    }
+    let mut offset = start_offset;
+    let mut partial = String::new();
+    let mut dead_ticks = 0u32;
+
+    loop {
+        {
+            let Ok(s) = session.lock() else {
+                break;
+            };
+            if matches!(s.status, SessionStatus::Stopped | SessionStatus::Error) {
+                break;
+            }
+        }
+
+        if let Ok(meta) = std::fs::metadata(&log_path)
+            && meta.len() > offset
+        {
+            let mut chunk = String::new();
+            if file.seek(SeekFrom::Start(offset)).is_ok() && file.read_to_string(&mut chunk).is_ok()
+            {
+                offset += chunk.len() as u64;
+                partial.push_str(&chunk);
+                let mut drained: Vec<String> = Vec::new();
+                while let Some(idx) = partial.find('\n') {
+                    let line: String = partial.drain(..idx).collect();
+                    partial.drain(..1);
+                    drained.push(line);
+                }
+                for line in drained {
+                    let line = line.trim_end_matches('\r').to_string();
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if let Ok(s) = session.lock()
+                        && let Ok(mut l) = s.logs.lock()
+                    {
+                        l.push(line.clone());
+                    }
+                    if let Some(url) = extract_tunnel_url(&line)
+                        && let Ok(mut s) = session.lock()
+                    {
+                        s.tunnel_url = Some(url);
+                        s.studio_ready = true;
+                    }
+                }
+            }
+        }
+
+        let (port, project_name, ready) = {
+            let Ok(s) = session.lock() else {
+                break;
+            };
+            (s.studio_port, s.project_name.clone(), s.studio_ready)
+        };
+        if ready && port_in_use(port) {
+            dead_ticks = 0;
+        } else if ready {
+            dead_ticks += 1;
+            if dead_ticks >= 10 {
+                if let Ok(mut s) = session.lock()
+                    && s.status == SessionStatus::Running
+                {
+                    s.stop();
+                }
+                add_global_log(&global, format!("Project '{}' exited.", project_name));
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }

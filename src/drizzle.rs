@@ -234,8 +234,15 @@ pub fn prepare_workspace(
 }
 
 /// Spawns `drizzle-kit studio` as a background process bound to a specific port,
-/// with stdout/stderr piped for streaming.
-pub fn spawn_studio(workspace_dir: &Path, db_url: &str, port: u16) -> Result<Child> {
+/// with stdout/stderr redirected to the given log file (so the process can
+/// survive the parent and keep logging).
+pub fn spawn_studio(
+    workspace_dir: &Path,
+    db_url: &str,
+    port: u16,
+    log_path: &Path,
+) -> Result<Child> {
+    let log_file = fs::File::create(log_path).context("Failed to create studio log file")?;
     let mut cmd = Command::new("npx");
     cmd.arg("drizzle-kit")
         .arg("studio")
@@ -246,8 +253,10 @@ pub fn spawn_studio(workspace_dir: &Path, db_url: &str, port: u16) -> Result<Chi
         .current_dir(workspace_dir)
         .env("DATABASE_URL", db_url)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::from(
+            log_file.try_clone().context("Failed to clone log file")?,
+        ))
+        .stderr(Stdio::from(log_file));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::{
     ExecutableCommand,
+    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::{CrosstermBackend, Terminal};
@@ -19,11 +20,18 @@ impl Tui {
     pub fn enter(&mut self) -> Result<()> {
         stdout().execute(EnterAlternateScreen)?;
         enable_raw_mode()?;
+        // Kitty keyboard protocol: makes Shift+Enter and other modified keys
+        // distinguishable in terminals that support it (kitty, WezTerm,
+        // Ghostty, Alacritty, foot). Unsupported terminals ignore it.
+        stdout().execute(PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ))?;
         self.terminal.clear()?;
         Ok(())
     }
 
     pub fn exit(&mut self) -> Result<()> {
+        stdout().execute(PopKeyboardEnhancementFlags)?;
         stdout().execute(LeaveAlternateScreen)?;
         disable_raw_mode()?;
         self.terminal.show_cursor()?;
