@@ -668,8 +668,6 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
-    let area = centered_rect(60, 25, f.area());
-
     let (title, prompt, theme_color) = match action {
         ConfirmationAction::DeleteProject => (
             " Delete Project ",
@@ -697,32 +695,61 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
         ),
     };
 
-    let popup_text = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            prompt,
+    let term = f.area();
+    const H_PAD: u16 = 4;
+    const V_PAD: u16 = 2;
+    let max_width = term.width.saturating_sub(8).clamp(24, 72);
+    let inner_width = max_width.saturating_sub(2 + H_PAD * 2) as usize;
+
+    let wrapped = wrap_text(&prompt, inner_width.max(1));
+    let prompt_lines: Vec<Line> = wrapped
+        .iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                l.as_str(),
+                Style::default()
+                    .fg(app.theme.text)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect();
+
+    let hint_line = Line::from(vec![
+        Span::styled(
+            " ⏎ ",
             Style::default()
-                .fg(app.theme.text)
+                .fg(app.theme.success)
                 .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " ⏎ ",
-                Style::default()
-                    .fg(app.theme.success)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Confirm        ", Style::default().fg(app.theme.dim)),
-            Span::styled(
-                " ⎋ ",
-                Style::default()
-                    .fg(app.theme.error)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Cancel  ", Style::default().fg(app.theme.dim)),
-        ]),
-    ];
+        ),
+        Span::styled("Confirm      ", Style::default().fg(app.theme.dim)),
+        Span::styled(
+            " ⎋ ",
+            Style::default()
+                .fg(app.theme.error)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Cancel", Style::default().fg(app.theme.dim)),
+    ]);
+
+    let longest_prompt = wrapped
+        .iter()
+        .map(|l| l.chars().count() as u16)
+        .max()
+        .unwrap_or(0);
+    let hint_width = 21u16;
+    let content_width = longest_prompt.max(hint_width).max(title.chars().count() as u16);
+    let width = (content_width + 2 + H_PAD * 2)
+        .clamp(24, max_width)
+        .min(term.width.saturating_sub(2));
+
+    let content_height = prompt_lines.len() as u16 + 1 + 1; // prompt + blank + hint
+    let height = (2 + V_PAD * 2 + content_height).min(term.height.saturating_sub(2));
+
+    let area = centered_rect_fixed(width, height, term);
+
+    let mut popup_text = prompt_lines;
+    popup_text.push(Line::from(""));
+    popup_text.push(hint_line);
 
     let popup_block = Block::default()
         .title(Span::styled(
@@ -734,7 +761,8 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme_color))
-        .padding(Padding::horizontal(4));
+        .style(Style::default().bg(app.theme.highlight_bg))
+        .padding(Padding::new(H_PAD, H_PAD, V_PAD, V_PAD));
 
     let paragraph = Paragraph::new(popup_text)
         .alignment(Alignment::Center)
@@ -742,6 +770,40 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
 
     f.render_widget(Clear, area);
     f.render_widget(paragraph, area);
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            if current.is_empty() {
+                current = word.to_string();
+            } else if current.chars().count() + 1 + word.chars().count() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current = word.to_string();
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+    lines
+}
+
+fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    let w = width.min(r.width);
+    let h = height.min(r.height);
+    let x = r.x + r.width.saturating_sub(w) / 2;
+    let y = r.y + r.height.saturating_sub(h) / 2;
+    Rect::new(x, y, w, h)
 }
 
 fn render_help_popup(f: &mut Frame, app: &App) {
