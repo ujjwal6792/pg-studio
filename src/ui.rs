@@ -19,22 +19,29 @@ pub fn draw(f: &mut Frame, app: &App) {
         .split(f.area());
 
     // 1. Header
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " 🗄️  PG-STUDIO ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            " | Remote Postgres Drizzle Studio Launcher",
-            Style::default().fg(Color::Gray),
-        ),
-    ]))
-    .block(
+    let header = Paragraph::new("").block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Line::from(vec![
+                Span::styled(
+                    " PG-STUDIO ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " | Remote Postgres Drizzle Studio Launcher",
+                    Style::default().fg(Color::Gray),
+                ),
+            ]))
+            .title(
+                Line::from(vec![Span::styled(
+                    format!(" v{} ", env!("CARGO_PKG_VERSION")),
+                    Style::default().fg(Color::Magenta),
+                )])
+                .right_aligned(),
+            ),
     );
     f.render_widget(header, main_chunks[0]);
 

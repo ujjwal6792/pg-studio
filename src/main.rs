@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::Parser;
 use crossterm::event::{self, Event, KeyCode};
 use pg_studio::{
     app::{ActivePane, App, AppMode, ConfirmationAction, FormField},
@@ -6,12 +7,61 @@ use pg_studio::{
     ssh::establish_tunnel,
     tui::Tui,
     ui::draw,
-    updater::update_cli,
+    updater::{check_for_update, update_cli},
 };
 use std::time::Duration;
 use tui_input::backend::crossterm::EventHandler;
 
+#[derive(Parser)]
+#[command(
+    name = "pg-studio",
+    about = "A CLI tool to introspect a remote Postgres database via SSH tunnel and launch Drizzle Studio",
+    disable_version_flag = true
+)]
+struct Cli {
+    /// Check for and install the latest release from GitHub, then exit.
+    #[arg(short, long)]
+    update: bool,
+
+    /// Check for the latest release without installing it.
+    #[arg(short, long)]
+    check: bool,
+
+    /// Print version.
+    #[arg(short = 'v', long = "version", visible_short_alias = 'V')]
+    version: bool,
+}
+
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    if cli.version {
+        println!("pg-studio {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if cli.update {
+        match update_cli() {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("Self-update error: {:#}", e);
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
+    if cli.check {
+        match check_for_update() {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("Update check error: {:#}", e);
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     let mut app = App::new()?;
     let mut tui = Tui::new()?;
     tui.enter()?;

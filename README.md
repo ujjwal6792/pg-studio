@@ -76,6 +76,16 @@ Simply run:
 pg-studio
 ```
 
+### CLI Arguments
+
+- **`pg-studio`** (no args): Launch the interactive TUI.
+- **`pg-studio --check` / `-c`**: Check GitHub for the latest release without
+  installing.
+- **`pg-studio --update` / `-u`**: Check for and install the latest GitHub
+  release, then exit.
+- **`pg-studio --version` / `-v` / `-V`**: Print the current version.
+- **`pg-studio --help` / `-h`**: Print usage help.
+
 ### Keyboard Navigation in TUI:
 
 - **`Tab`**: Switch focus between **Projects List**, **Project Form**, and
