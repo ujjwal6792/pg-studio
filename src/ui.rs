@@ -2,6 +2,7 @@ use crate::app::{
     ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField, ProjectState,
 };
 use crate::config::{ConnectionType, ProjectConfig};
+use crate::dbbackup::JobStatus;
 use crate::session::SessionStatus;
 use crate::theme::Theme;
 use ratatui::{
@@ -675,7 +676,59 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
 fn draw_process(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = vec![];
 
+    if !app.jobs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " Dumps ",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for job in &app.jobs {
+            if let Ok(j) = job.lock() {
+                let (status_text, color) = match j.status {
+                    JobStatus::Running => ("running", app.theme.warn),
+                    JobStatus::Done => ("done", app.theme.success),
+                    JobStatus::Failed => ("failed", app.theme.error),
+                    JobStatus::Cancelled => ("cancelled", app.theme.muted),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(
+                            " {} {} ",
+                            if j.status == JobStatus::Running {
+                                "▶"
+                            } else {
+                                " "
+                            },
+                            j.label
+                        ),
+                        Style::default().fg(app.theme.text),
+                    ),
+                    Span::styled(
+                        format!("[{status_text} {}]", j.elapsed()),
+                        Style::default().fg(color),
+                    ),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    format!("     {}", j.detail),
+                    Style::default().fg(app.theme.muted),
+                )));
+                if let Some(err) = &j.error {
+                    lines.push(Line::from(Span::styled(
+                        format!("     error: {err}"),
+                        Style::default().fg(app.theme.error),
+                    )));
+                }
+            }
+        }
+        lines.push(Line::from(""));
+    }
+
     if app.sessions.is_empty() {
+        if !lines.is_empty() {
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            return;
+        }
         lines.push(Line::from(Span::styled(
             "No running studios. Press Enter to focus a project's details, then Enter again to launch.",
             Style::default().fg(app.theme.muted),
@@ -844,6 +897,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 ("d", "Del"),
                 ("/", "Filter"),
                 ("t", "Test"),
+                ("b", "Backup"),
                 ("s", "Stop"),
                 ("o/c", "URL"),
                 ("Pg↑/↓", "Logs"),
@@ -857,6 +911,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 ("r", "Run"),
                 ("e", "Edit"),
                 ("t", "Test"),
+                ("b", "Backup"),
                 ("s", "Stop"),
                 ("o/c", "URL"),
                 ("q", "Quit"),
@@ -1121,6 +1176,7 @@ fn render_help_popup(f: &mut Frame, app: &App) {
                     "Focus details pane; press again to launch without opening browser",
                 ),
                 ("t", "Test connection reachability without launching"),
+                ("b", "Backup menu: app backup, restore, or DB dump"),
                 ("/", "Filter projects by name (Esc clears)"),
                 ("s", "Stop selected project's studio"),
             ],

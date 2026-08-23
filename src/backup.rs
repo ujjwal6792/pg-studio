@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 /// Directory backups are "downloaded" to by default: the user's Downloads
 /// folder, falling back to their home directory.
-fn download_dir() -> Result<PathBuf> {
+pub fn download_dir() -> Result<PathBuf> {
     if let Some(user) = directories::UserDirs::new()
         && let Some(dl) = user.download_dir()
     {

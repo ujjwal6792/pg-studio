@@ -1,5 +1,6 @@
 use crate::check;
 use crate::config::{AppConfig, ConnectionType, ProjectBundle, ProjectConfig};
+use crate::dbbackup::{self, DumpFormat, Job, JobStatus};
 use crate::drizzle::{check_dependencies, extract_tunnel_url, prepare_workspace, spawn_studio};
 use crate::open::{copy_to_clipboard, open_url};
 use crate::persist::{self, PersistedSession};
@@ -171,6 +172,9 @@ pub struct App {
     pub backup_menu_idx: usize,
     pub input_backup_path: Input,
 
+    /// Background pg_dump jobs shown in the Process tab.
+    pub jobs: Vec<Arc<Mutex<Job>>>,
+
     // Form inputs
     pub input_name: Input,
     pub input_ssh: Input,
@@ -236,6 +240,8 @@ impl App {
 
             backup_menu_idx: 0,
             input_backup_path: Input::default(),
+
+            jobs: Vec::new(),
 
             input_name: Input::default(),
             input_ssh: Input::default(),
@@ -550,9 +556,12 @@ impl App {
     }
 
     // --- Backup menu ('b') ---
-
     pub fn backup_menu_items() -> &'static [&'static str] {
-        &["Download app backup", "Restore app backup from file"]
+        &[
+            "Download app backup",
+            "Restore app backup from file",
+            "Dump selected project DB (.dump custom / .sql plain)",
+        ]
     }
 
     pub fn open_backup_menu(&mut self) {
@@ -570,10 +579,14 @@ impl App {
         let len = Self::backup_menu_items().len();
         let current = self.backup_menu_idx as isize;
         self.backup_menu_idx = ((current + delta).rem_euclid(len as isize)) as usize;
-        let default_path = if self.backup_menu_idx == 0 {
-            crate::backup::default_backup_path()
-        } else {
-            AppConfig::export_file_path()
+        let default_path = match self.backup_menu_idx {
+            0 => crate::backup::default_backup_path(),
+            1 => AppConfig::export_file_path(),
+            _ => {
+                let name = self.selected_project_name();
+                let format = DumpFormat::Custom;
+                dbbackup::default_dump_path(&name, format)
+            }
         };
         self.input_backup_path = Input::from(
             default_path
@@ -614,7 +627,101 @@ impl App {
                 }
                 Err(e) => self.add_log(format!("Restore failed: {:#}", e)),
             },
+            2 => {
+                if self.config.projects.is_empty() {
+                    self.add_log("Dump aborted: no project selected.".to_string());
+                    return;
+                }
+                let proj = self.config.projects[self.selected_project_idx].clone();
+                let format = DumpFormat::from_path(&path);
+                self.spawn_dump_job(proj, path, format);
+                self.mode = AppMode::Normal;
+            }
             _ => {}
+        }
+    }
+
+    /// Starts a pg_dump for `proj` on a background thread and surfaces it in
+    /// the Process tab as a cancellable job.
+    pub fn spawn_dump_job(&mut self, proj: ProjectConfig, out: PathBuf, format: DumpFormat) {
+        let name = proj.name.clone();
+        let job = Arc::new(Mutex::new(Job {
+            label: format!("DB dump · {name}"),
+            status: JobStatus::Running,
+            started_at: chrono::Utc::now().timestamp(),
+            detail: out.to_string_lossy().to_string(),
+            error: None,
+            pid: Arc::new(Mutex::new(None)),
+        }));
+        self.jobs.push(job.clone());
+        self.add_log(format!(
+            "Starting pg_dump for '{name}' ({} format)...",
+            match format {
+                DumpFormat::Custom => "custom",
+                DumpFormat::Plain => "plain SQL",
+            }
+        ));
+
+        let pid_sink = Arc::new(Mutex::new(None));
+        if let Ok(mut j) = job.lock() {
+            j.pid = pid_sink.clone();
+        }
+        let global_logs = self.logs.clone();
+
+        std::thread::spawn(move || {
+            let stderr_logs = global_logs.clone();
+            let log_line: dbbackup::LogFn =
+                std::sync::Arc::new(move |line: String| add_global_log(&stderr_logs, line));
+            match dbbackup::run_dump(&proj, out.clone(), format, pid_sink, log_line) {
+                Ok((size, _guard)) => {
+                    if let Ok(mut j) = job.lock()
+                        && j.status == JobStatus::Running
+                    {
+                        j.status = JobStatus::Done;
+                        j.detail = format!("{} · {}", out.display(), human_size(size));
+                    }
+                    add_global_log(
+                        &global_logs,
+                        format!("Dump complete: {} ({})", name, human_size(size)),
+                    );
+                }
+                Err(e) => {
+                    let cancelled = job
+                        .lock()
+                        .map(|j| j.status == JobStatus::Cancelled)
+                        .unwrap_or(false);
+                    if let Ok(mut j) = job.lock()
+                        && j.status == JobStatus::Running
+                    {
+                        j.status = if cancelled {
+                            JobStatus::Cancelled
+                        } else {
+                            JobStatus::Failed
+                        };
+                        j.error = Some(format!("{:#}", e));
+                    }
+                    if cancelled {
+                        add_global_log(&global_logs, format!("Dump cancelled: {name}"));
+                    } else {
+                        add_global_log(&global_logs, format!("Dump failed: {name}: {:#}", e));
+                    }
+                }
+            }
+        });
+    }
+
+    /// Cancels any running dump jobs belonging to `project_name`.
+    pub fn stop_jobs_for(&mut self, project_name: &str) {
+        for job in &self.jobs {
+            let matches = job
+                .lock()
+                .map(|j| j.label.ends_with(project_name) && j.status == JobStatus::Running);
+            if matches.unwrap_or(false)
+                && let Ok(mut j) = job.lock()
+            {
+                j.status = JobStatus::Cancelled;
+                j.cancel();
+            }
         }
     }
 
@@ -624,6 +731,7 @@ impl App {
         {
             let removed = self.config.projects.remove(self.selected_project_idx);
             self.stop_session_for(&removed.name);
+            self.stop_jobs_for(&removed.name);
             self.config.save()?;
             if self.selected_project_idx >= self.config.projects.len()
                 && self.selected_project_idx > 0
@@ -910,6 +1018,7 @@ impl App {
         if name.is_empty() {
             return;
         }
+        self.stop_jobs_for(&name);
         if let Some(session) = self.session_for(&name) {
             if let Ok(mut s) = session.lock() {
                 s.stop();
@@ -1095,6 +1204,21 @@ fn push_session_log(session: &Arc<Mutex<RunningSession>>, msg: String) {
 fn add_global_log(global: &Arc<Mutex<Vec<String>>>, msg: String) {
     if let Ok(mut g) = global.lock() {
         g.push(msg);
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
     }
 }
 
@@ -1418,6 +1542,7 @@ mod tests {
             log_scroll: 0,
             backup_menu_idx: 0,
             input_backup_path: Input::default(),
+            jobs: Vec::new(),
             input_name: Input::from("n"),
             input_ssh: Input::from("s"),
             input_url: Input::from("u"),

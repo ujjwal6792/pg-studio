@@ -2,6 +2,7 @@ pub mod app;
 pub mod backup;
 pub mod check;
 pub mod config;
+pub mod dbbackup;
 pub mod drizzle;
 pub mod open;
 pub mod persist;
