@@ -998,8 +998,19 @@ fn render_help_popup(f: &mut Frame, app: &App) {
             "Global",
             &[
                 ("?", "Toggle this help"),
-                ("PgUp / PgDn", "Scroll the Logs pane (click it to re-follow)"),
-                ("Mouse", "Click panes/tabs/rows, wheel scrolls lists and logs"),
+                (
+                    "PgUp / PgDn",
+                    "Scroll the Logs pane (click it to re-follow)",
+                ),
+                (
+                    "Mouse",
+                    "Click panes/tabs/rows, wheel scrolls lists and logs",
+                ),
+                (
+                    "x",
+                    "Export all projects to a portable JSON file (no secrets)",
+                ),
+                ("i", "Import projects from that file (skips existing names)"),
                 ("u", "Self-update pg-studio"),
                 ("q / Esc", "Quit (stops all running studios)"),
             ],

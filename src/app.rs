@@ -1,5 +1,5 @@
 use crate::check;
-use crate::config::{AppConfig, ConnectionType, ProjectConfig};
+use crate::config::{AppConfig, ConnectionType, ProjectBundle, ProjectConfig};
 use crate::drizzle::{check_dependencies, extract_tunnel_url, prepare_workspace, spawn_studio};
 use crate::open::{copy_to_clipboard, open_url};
 use crate::persist::{self, PersistedSession};
@@ -498,6 +498,43 @@ impl App {
         self.status_message = format!("Project '{}' saved successfully!", name);
         self.error_message = None;
         Ok(())
+    }
+
+    /// Writes all project definitions (password-free) to the export bundle.
+    pub fn export_projects(&self) -> Result<PathBuf> {
+        let bundle = ProjectBundle::new(self.config.projects.clone());
+        let path = AppConfig::export_file_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&bundle)?)?;
+        Ok(path)
+    }
+
+    /// Merges projects from the export bundle, skipping names that already
+    /// exist. Returns `(imported, skipped)` and persists on success.
+    pub fn import_projects(&mut self) -> Result<(usize, usize)> {
+        let path = AppConfig::export_file_path()?;
+        let content = std::fs::read_to_string(&path)?;
+        let bundle: ProjectBundle = serde_json::from_str(&content)?;
+        let mut imported = 0;
+        let mut skipped = 0;
+        for project in bundle.projects {
+            if self.config.projects.iter().any(|p| p.name == project.name) {
+                skipped += 1;
+                continue;
+            }
+            self.config.projects.push(project);
+            imported += 1;
+        }
+        if imported > 0 {
+            self.config.save()?;
+            self.config
+                .projects
+                .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+            self.load_selected_into_form();
+        }
+        Ok((imported, skipped))
     }
 
     pub fn delete_selected_project(&mut self) -> Result<()> {

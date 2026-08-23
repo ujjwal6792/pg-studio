@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use pg_studio::{
     app::{ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField},
     theme,
@@ -268,11 +270,28 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<()> {
                     app.start_selected_project(false);
                 }
             }
-                    KeyCode::Char('t') => {
-                        app.test_selected_connection();
-                    }
-                    KeyCode::PageUp => app.scroll_logs(-10),
-                    KeyCode::PageDown => app.scroll_logs(10),
+            KeyCode::Char('x') => match app.export_projects() {
+                Ok(path) => app.add_log(format!(
+                    "Exported {} projects to {} (passwords stay in your keychain).",
+                    app.config.projects.len(),
+                    path.display()
+                )),
+                Err(e) => app.add_log(format!("Export failed: {:#}", e)),
+            },
+            KeyCode::Char('i') => match app.import_projects() {
+                Ok((imported, skipped)) if imported + skipped == 0 => {
+                    app.add_log("Nothing to import: export file is empty or missing.".to_string())
+                }
+                Ok((imported, skipped)) => app.add_log(format!(
+                    "Imported {imported} project(s), skipped {skipped} existing."
+                )),
+                Err(e) => app.add_log(format!("Import failed: {:#}", e)),
+            },
+            KeyCode::Char('t') => {
+                app.test_selected_connection();
+            }
+            KeyCode::PageUp => app.scroll_logs(-10),
+            KeyCode::PageDown => app.scroll_logs(10),
             KeyCode::Char('s') => {
                 let name = app.selected_project_name();
                 if !name.is_empty() && app.session_for(&name).is_some() {

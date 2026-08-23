@@ -209,6 +209,32 @@ impl AppConfig {
             .context("Could not determine project directories")?;
         Ok(proj_dirs.config_dir().join("config.toml"))
     }
+
+    /// Path of the portable project bundle written by `x` / read by `i`.
+    /// Passwords never appear here: they stay in the OS keychain.
+    pub fn export_file_path() -> Result<PathBuf> {
+        let proj_dirs = ProjectDirs::from("com", "dbstudio", "pg-studio")
+            .context("Could not determine project directories")?;
+        Ok(proj_dirs.config_dir().join("projects-export.json"))
+    }
+}
+
+/// Portable bundle of project definitions (no secrets).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProjectBundle {
+    pub version: u32,
+    pub exported_at: i64,
+    pub projects: Vec<ProjectConfig>,
+}
+
+impl ProjectBundle {
+    pub fn new(projects: Vec<ProjectConfig>) -> Self {
+        Self {
+            version: 1,
+            exported_at: chrono::Utc::now().timestamp(),
+            projects,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -305,5 +331,31 @@ last_opened = 123
             path.with_extension("toml.bak"),
             std::path::PathBuf::from("/data/pg-studio/config.toml.bak")
         );
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    #[test]
+    fn project_bundle_round_trips_without_passwords() {
+        let bundle = ProjectBundle::new(vec![ProjectConfig {
+            name: "prod".into(),
+            connection_type: ConnectionType::Url,
+            ssh_connection: String::new(),
+            db_url: "postgresql://alice@db.example.com:5432/app".into(),
+            db_host: String::new(),
+            db_port: "5432".into(),
+            db_name: "app".into(),
+            db_user: "alice".into(),
+            last_opened: 42,
+        }]);
+        let json = serde_json::to_string(&bundle).unwrap();
+        assert!(!json.contains("password"));
+        let parsed: ProjectBundle = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.projects.len(), 1);
+        assert_eq!(parsed.projects[0].name, "prod");
+        assert_eq!(parsed.version, 1);
     }
 }
