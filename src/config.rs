@@ -156,6 +156,10 @@ fn inject_password(url: &str, password: &str) -> String {
 }
 
 impl AppConfig {
+    #[cfg(test)]
+    pub(crate) fn with_projects(projects: Vec<ProjectConfig>) -> Self {
+        Self { projects }
+    }
     pub fn load() -> Result<Self> {
         let config_path = Self::config_file_path()?;
         if config_path.exists() {
@@ -204,5 +208,102 @@ impl AppConfig {
         let proj_dirs = ProjectDirs::from("com", "dbstudio", "pg-studio")
             .context("Could not determine project directories")?;
         Ok(proj_dirs.config_dir().join("config.toml"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_url_password_extracts_and_strips_password() {
+        let url = "postgresql://alice:s3cret@db.example.com:5432/app";
+        let (redacted, pass) = ProjectConfig::redact_url_password(url);
+        assert_eq!(pass.as_deref(), Some("s3cret"));
+        assert_eq!(redacted, "postgresql://alice@db.example.com:5432/app");
+        assert!(!redacted.contains("s3cret"));
+    }
+
+    #[test]
+    fn redact_url_password_leaves_url_without_password_alone() {
+        for url in [
+            "postgresql://alice@db.example.com:5432/app",
+            "postgresql://db.example.com:5432/app",
+            "not-a-url",
+            "",
+        ] {
+            let (redacted, pass) = ProjectConfig::redact_url_password(url);
+            assert_eq!(pass, None);
+            assert_eq!(redacted, url);
+        }
+    }
+
+    #[test]
+    fn inject_password_adds_missing_password() {
+        let out = inject_password("postgresql://alice@db.example.com:5432/app", "pw");
+        assert_eq!(out, "postgresql://alice:pw@db.example.com:5432/app");
+    }
+
+    #[test]
+    fn inject_password_keeps_existing_password() {
+        let url = "postgresql://alice:existing@db.example.com:5432/app";
+        assert_eq!(inject_password(url, "pw"), url);
+    }
+
+    #[test]
+    fn inject_password_ignores_empty_or_unusable_urls() {
+        assert_eq!(
+            inject_password("postgresql://alice@host/db", ""),
+            "postgresql://alice@host/db"
+        );
+        assert_eq!(inject_password("no-scheme-no-at", "pw"), "no-scheme-no-at");
+        assert_eq!(
+            inject_password("postgresql://host:5432/db", "pw"),
+            "postgresql://host:5432/db"
+        );
+    }
+
+    #[test]
+    fn config_toml_round_trips_local_connection_type() {
+        let project = ProjectConfig {
+            name: "local-dev".into(),
+            connection_type: ConnectionType::Local,
+            ssh_connection: String::new(),
+            db_url: String::new(),
+            db_host: "localhost".into(),
+            db_port: "5432".into(),
+            db_name: "postgres".into(),
+            db_user: "postgres".into(),
+            last_opened: 0,
+        };
+        let toml_str = toml::to_string(&AppConfig::with_projects(vec![project])).unwrap();
+        assert!(toml_str.contains("connection_type = \"local\""));
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.projects[0].connection_type, ConnectionType::Local);
+    }
+
+    #[test]
+    fn legacy_config_without_connection_type_defaults_to_ssh() {
+        let legacy = r#"
+[[projects]]
+name = "old-project"
+ssh_connection = "ubuntu@10.0.0.1"
+db_port = "5432"
+db_name = "app"
+db_user = "admin"
+last_opened = 123
+"#;
+        let parsed: AppConfig = toml::from_str(legacy).unwrap();
+        assert_eq!(parsed.projects.len(), 1);
+        assert_eq!(parsed.projects[0].connection_type, ConnectionType::Ssh);
+    }
+
+    #[test]
+    fn backup_path_replaces_extension() {
+        let path = std::path::PathBuf::from("/data/pg-studio/config.toml");
+        assert_eq!(
+            path.with_extension("toml.bak"),
+            std::path::PathBuf::from("/data/pg-studio/config.toml.bak")
+        );
     }
 }

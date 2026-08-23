@@ -960,3 +960,31 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         ])
         .split(popup_layout[1])[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_text_respects_width() {
+        let wrapped = wrap_text("aaaa bbbb cccc dddd", 9);
+        assert!(wrapped.iter().all(|l| l.chars().count() <= 9));
+        assert_eq!(wrapped.join(" "), "aaaa bbbb cccc dddd");
+    }
+
+    #[test]
+    fn wrap_text_splits_on_newlines() {
+        let wrapped = wrap_text("one\ntwo\n\nthree", 20);
+        assert_eq!(
+            wrapped,
+            vec!["one".to_string(), "two".to_string(), String::new(), "three".to_string()]
+        );
+    }
+
+    #[test]
+    fn wrap_text_breaks_single_long_words() {
+        // A word longer than the width still lands on its own line.
+        let wrapped = wrap_text("abcdefghij", 5);
+        assert_eq!(wrapped, vec!["abcdefghij".to_string()]);
+    }
+}

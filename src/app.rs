@@ -1048,3 +1048,88 @@ fn tail_session_log(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_field_order_skips_url_only_fields() {
+        let order = FormField::order(ConnectionType::Ssh);
+        assert!(!order.contains(&FormField::DbUrl));
+        assert!(!order.contains(&FormField::DbHost));
+    }
+
+    #[test]
+    fn url_field_order_includes_url_and_host() {
+        let order = FormField::order(ConnectionType::Url);
+        assert!(order.contains(&FormField::DbUrl));
+        assert!(order.contains(&FormField::DbHost));
+    }
+
+    #[test]
+    fn local_field_order_has_no_url_or_ssh() {
+        let order = FormField::order(ConnectionType::Local);
+        assert!(!order.contains(&FormField::DbUrl));
+        assert!(!order.contains(&FormField::SshConnection));
+        assert!(order.contains(&FormField::DbHost));
+    }
+
+    #[test]
+    fn next_and_prev_wrap_around_for_every_type() {
+        for ct in [
+            ConnectionType::Ssh,
+            ConnectionType::Url,
+            ConnectionType::Local,
+        ] {
+            let order = FormField::order(ct);
+            let mut f = FormField::Name;
+            for _ in 0..order.len() {
+                f = f.next(ct);
+            }
+            assert_eq!(f, FormField::Name);
+            for _ in 0..order.len() {
+                f = f.prev(ct);
+            }
+            assert_eq!(f, FormField::Name);
+        }
+    }
+
+    #[test]
+    fn next_from_last_field_is_first_field() {
+        let order = FormField::order(ConnectionType::Local);
+        let last = *order.last().unwrap();
+        assert_eq!(last.next(ConnectionType::Local), order[0]);
+    }
+
+    #[test]
+    fn input_accessors_map_every_editable_field() {
+        let app = App {
+            config: AppConfig::default(),
+            selected_project_idx: 0,
+            active_pane: ActivePane::ProjectsList,
+            details_tab: DetailsTab::Overview,
+            mode: AppMode::Normal,
+            confirm_action: None,
+            input_name: Input::from("n"),
+            input_ssh: Input::from("s"),
+            input_url: Input::from("u"),
+            input_host: Input::from("h"),
+            input_port: Input::from("p"),
+            input_dbname: Input::from("d"),
+            input_dbuser: Input::from("r"),
+            input_dbpass: Input::from("*"),
+            connection_type: ConnectionType::Local,
+            active_field: FormField::Name,
+            is_new_project: false,
+            status_message: String::new(),
+            error_message: None,
+            logs: Arc::new(Mutex::new(Vec::new())),
+            sessions: Vec::new(),
+            theme: Theme::default(),
+        };
+        assert_eq!(app.input(FormField::Name).unwrap().value(), "n");
+        assert_eq!(app.input(FormField::DbPass).unwrap().value(), "*");
+        assert!(app.input(FormField::ConnectionType).is_none());
+    }
+}
