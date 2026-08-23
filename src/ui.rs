@@ -107,10 +107,7 @@ fn draw_projects_list(f: &mut Frame, app: &mut App, area: Rect) {
         };
         let row = Line::from(vec![
             Span::styled("/", Style::default().fg(app.theme.accent)),
-            Span::styled(
-                filter_text.clone(),
-                Style::default().fg(app.theme.text),
-            ),
+            Span::styled(filter_text.clone(), Style::default().fg(app.theme.text)),
         ]);
         f.render_widget(Paragraph::new(row), chunks[0]);
         if let Some(pos) = cursor {
@@ -201,8 +198,10 @@ fn project_row(app: &App, selected: bool, inner_width: usize, p: &ProjectConfig)
         Modifier::empty()
     };
 
-    let marker_span =
-        Span::styled(format!(" {} ", marker), Style::default().fg(marker_color).bg(bg));
+    let marker_span = Span::styled(
+        format!(" {} ", marker),
+        Style::default().fg(marker_color).bg(bg),
+    );
     let name_text = format!("{} {} ", icon, p.name);
     let name_span = Span::styled(
         name_text,
@@ -277,8 +276,8 @@ fn draw_details_subtabs(f: &mut Frame, app: &App, area: Rect) {
             .border_style(border_style);
         let inner = block.inner(chunks[i]);
         f.render_widget(block, chunks[i]);
-        let tab_widget = Paragraph::new(Span::styled(*label, text_style))
-            .alignment(Alignment::Center);
+        let tab_widget =
+            Paragraph::new(Span::styled(*label, text_style)).alignment(Alignment::Center);
         f.render_widget(tab_widget, inner);
     }
 }
@@ -302,14 +301,14 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(app.theme.text),
         )),
         Line::from(Span::styled(
-                format!(
-                    " Connection Type   : {}",
-                    match proj.connection_type {
-                        ConnectionType::Ssh => "SSH Tunnel",
-                        ConnectionType::Url => "Public URL",
-                        ConnectionType::Local => "Local",
-                    }
-                ),
+            format!(
+                " Connection Type   : {}",
+                match proj.connection_type {
+                    ConnectionType::Ssh => "SSH Tunnel",
+                    ConnectionType::Url => "Public URL",
+                    ConnectionType::Local => "Local",
+                }
+            ),
             Style::default().fg(app.theme.text),
         )),
     ];
@@ -697,10 +696,7 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
             let (desc, example) = app.active_field.get_help();
             (
                 format!(" Field Guide: {:?} ", app.active_field),
-                format!(
-                    "{} {}\n\n{} {}",
-                    '\u{f0eb}', desc, '\u{f02b}', example
-                ),
+                format!("{} {}\n\n{} {}", '\u{f0eb}', desc, '\u{f02b}', example),
             )
         }
         _ => {
@@ -824,7 +820,9 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
         .max()
         .unwrap_or(0);
     let hint_width = 21u16;
-    let content_width = longest_prompt.max(hint_width).max(title.chars().count() as u16);
+    let content_width = longest_prompt
+        .max(hint_width)
+        .max(title.chars().count() as u16);
     let width = (content_width + 2 + H_PAD * 2)
         .clamp(24, max_width)
         .min(term.width.saturating_sub(2));
@@ -900,10 +898,7 @@ fn render_help_popup(f: &mut Frame, app: &App) {
         (
             "Navigation",
             &[
-                (
-                    "← / →",
-                    "Focus Projects list / Details pane",
-                ),
+                ("← / →", "Focus Projects list / Details pane"),
                 ("[ or ]", "Flip focus between Projects and Details"),
                 ("1 / 2", "Jump to Projects / Details"),
                 (
@@ -940,9 +935,13 @@ fn render_help_popup(f: &mut Frame, app: &App) {
         (
             "Editing",
             &[
-                ("Enter / Space", "Cycle Connection Type (SSH -> URL -> Local)"),
+                (
+                    "Enter / Space",
+                    "Cycle Connection Type (SSH -> URL -> Local)",
+                ),
                 ("Tab / ↓", "Next field"),
                 ("Shift+Tab / ↑", "Previous field"),
+                ("Paste", "A full postgres:// URL auto-fills all fields"),
                 ("Enter", "Save project"),
                 ("Esc", "Cancel edit"),
             ],
@@ -1034,7 +1033,12 @@ mod tests {
         let wrapped = wrap_text("one\ntwo\n\nthree", 20);
         assert_eq!(
             wrapped,
-            vec!["one".to_string(), "two".to_string(), String::new(), "three".to_string()]
+            vec![
+                "one".to_string(),
+                "two".to_string(),
+                String::new(),
+                "three".to_string()
+            ]
         );
     }
 

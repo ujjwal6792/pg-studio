@@ -1,7 +1,10 @@
 use anyhow::Result;
 use crossterm::{
     ExecutableCommand,
-    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::{CrosstermBackend, Terminal};
@@ -26,12 +29,16 @@ impl Tui {
         stdout().execute(PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
         ))?;
+        // Bracketed paste lets us detect multi-char pastes (used for smart
+        // URL filling). Unsupported terminals simply ignore it.
+        stdout().execute(EnableBracketedPaste)?;
         self.terminal.clear()?;
         Ok(())
     }
 
     pub fn exit(&mut self) -> Result<()> {
         stdout().execute(PopKeyboardEnhancementFlags)?;
+        stdout().execute(DisableBracketedPaste)?;
         stdout().execute(LeaveAlternateScreen)?;
         disable_raw_mode()?;
         self.terminal.show_cursor()?;

@@ -249,7 +249,8 @@ impl App {
         app.load_selected_into_form();
         app.restore_sessions();
         if let Some(warning) = config_warning {
-            app.status_message = "Config error: starting with an empty project list (see Logs).".to_string();
+            app.status_message =
+                "Config error: starting with an empty project list (see Logs).".to_string();
             app.add_log(warning);
         }
         Ok(app)
@@ -641,6 +642,45 @@ impl App {
     }
 
     // --- Launch flow ---
+
+    /// Smart paste: recognises a complete `postgresql://...` URL and fills
+    /// every form field from it. Returns `true` when the paste was consumed;
+    /// otherwise the caller should insert the text into the active field.
+    pub fn apply_pasted_text(&mut self, text: &str) -> bool {
+        if self.mode != AppMode::EditingForm {
+            return false;
+        }
+        let Some(parsed) = check::parse_full_pg_url(text) else {
+            return false;
+        };
+
+        let redacted_url = format!(
+            "postgresql://{}@{}:{}/{}",
+            parsed.user, parsed.host, parsed.port, parsed.dbname
+        );
+        self.connection_type = ConnectionType::Url;
+        self.input_url = Input::from(redacted_url);
+        if !parsed.user.is_empty() {
+            self.input_dbuser = Input::from(parsed.user.clone());
+        }
+        self.input_host = Input::from(parsed.host.clone());
+        self.input_port = if parsed.port == 5432 {
+            Input::default()
+        } else {
+            Input::from(parsed.port.to_string())
+        };
+        self.input_dbname = Input::from(parsed.dbname.clone());
+        if let Some(password) = parsed.password
+            && !password.is_empty()
+        {
+            self.input_dbpass = Input::from(password);
+        }
+        self.active_field = FormField::DbUrl;
+        self.error_message = None;
+        self.status_message =
+            "Detected a full connection URL - all fields were filled in.".to_string();
+        true
+    }
 
     /// Verifies the selected project is reachable without launching Studio.
     /// Runs on a background thread; results are written to the Logs pane.

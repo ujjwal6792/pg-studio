@@ -96,6 +96,65 @@ pub fn parse_db_url_host_port(url: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port.parse().ok()?))
 }
 
+/// A fully-parsed `postgresql://` URL with every component the form needs.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParsedPgUrl {
+    pub user: String,
+    pub password: Option<String>,
+    pub host: String,
+    pub port: u16,
+    pub dbname: String,
+}
+
+/// Parses a complete `postgresql://user[:pass]@host[:port]/db[?params]` URL.
+/// Returns `None` for partial input (e.g. while a user is still typing), so
+/// callers can safely use it as an auto-detection gate on paste.
+pub fn parse_full_pg_url(url: &str) -> Option<ParsedPgUrl> {
+    let trimmed = url.trim();
+    let scheme = trimmed.split_once("://")?.0;
+    if !scheme.eq_ignore_ascii_case("postgresql") && !scheme.eq_ignore_ascii_case("postgres") {
+        return None;
+    }
+    let rest = &trimmed[scheme.len() + 3..];
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => return None, // no database segment -> treat as incomplete
+    };
+    if authority.is_empty() {
+        return None;
+    }
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((u, h)) => (u, h),
+        None => ("", authority),
+    };
+    let (user, password) = userinfo
+        .split_once(':')
+        .map(|(u, p)| (u.to_string(), Some(p.to_string())))
+        .unwrap_or((userinfo.to_string(), None));
+    // IPv6 literals arrive as `[::1]:5432`.
+    let (host, port) = if let Some(inner) = hostport.strip_prefix('[') {
+        let (host, rest) = inner.split_once(']')?;
+        let port = rest.strip_prefix(':').unwrap_or("5432");
+        (format!("[{host}]"), port)
+    } else {
+        match hostport.split_once(':') {
+            Some((h, p)) => (h.to_string(), p),
+            None => (hostport.to_string(), "5432"),
+        }
+    };
+    let dbname = path.split('?').next().unwrap_or("");
+    if host.is_empty() || dbname.is_empty() {
+        return None;
+    }
+    Some(ParsedPgUrl {
+        user,
+        password,
+        host,
+        port: port.parse().ok()?,
+        dbname: dbname.to_string(),
+    })
+}
+
 fn check_tcp(host: &str, port: u16) -> Result<String> {
     let addrs: Vec<_> = (host, port)
         .to_socket_addrs()
@@ -154,5 +213,49 @@ mod tests {
     fn rejects_garbage() {
         assert_eq!(parse_db_url_host_port("not-a-url"), None);
         assert_eq!(parse_db_url_host_port(""), None);
+    }
+
+    #[test]
+    fn parses_full_url_with_every_component() {
+        let parsed =
+            parse_full_pg_url("postgresql://alice:s3cret@db.example.com:6543/app?sslmode=require")
+                .unwrap();
+        assert_eq!(
+            parsed,
+            ParsedPgUrl {
+                user: "alice".into(),
+                password: Some("s3cret".into()),
+                host: "db.example.com".into(),
+                port: 6543,
+                dbname: "app".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_minimal_full_url_with_defaults() {
+        let parsed = parse_full_pg_url("postgres://bob@localhost/mydb").unwrap();
+        assert_eq!(parsed.port, 5432);
+        assert_eq!(parsed.password, None);
+        assert_eq!(parsed.host, "localhost");
+        assert_eq!(parsed.dbname, "mydb");
+    }
+
+    #[test]
+    fn rejects_incomplete_urls_so_typing_does_not_trigger() {
+        for partial in [
+            "postgres",
+            "postgresql://",
+            "postgresql://loc",
+            "postgresql://loc:5432", // no /dbname yet
+            "postgresql:///db",      // no host
+        ] {
+            assert_eq!(parse_full_pg_url(partial), None, "should reject {partial}");
+        }
+    }
+
+    #[test]
+    fn rejects_non_postgres_schemes() {
+        assert_eq!(parse_full_pg_url("mysql://root@host/db"), None);
     }
 }
