@@ -1,6 +1,6 @@
 [package]
 name = "pg-studio"
-version = "0.2.3"
+version = "0.2.4"
 description = "A CLI tool to introspect a remote Postgres database via SSH tunnel and launch Drizzle Studio"
 license = "MIT"
 edition = "2024"

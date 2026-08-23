@@ -100,25 +100,20 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                     KeyCode::Char('?') => {
                         app.mode = AppMode::Help;
                     }
-                    KeyCode::Tab | KeyCode::Right => {
-                        app.cycle_pane(true);
+                    KeyCode::Tab => app.cycle_details_tab(true),
+                    KeyCode::BackTab => app.cycle_details_tab(false),
+                    KeyCode::Left | KeyCode::Char('1') => {
+                        app.active_pane = ActivePane::ProjectsList;
                     }
-                    KeyCode::Left => {
-                        app.cycle_pane(false);
+                    KeyCode::Right | KeyCode::Char('2') => {
+                        app.active_pane = ActivePane::Details;
                     }
-                    KeyCode::Char(']') => {
-                        if app.active_pane == ActivePane::Details {
-                            app.cycle_details_tab(true);
+                    KeyCode::Char('[') | KeyCode::Char(']') => {
+                        app.active_pane = if app.active_pane == ActivePane::ProjectsList {
+                            ActivePane::Details
                         } else {
-                            app.cycle_pane(true);
-                        }
-                    }
-                    KeyCode::Char('[') => {
-                        if app.active_pane == ActivePane::Details {
-                            app.cycle_details_tab(false);
-                        } else {
-                            app.cycle_pane(false);
-                        }
+                            ActivePane::ProjectsList
+                        };
                     }
                     KeyCode::Char('}') => app.cycle_details_tab(true),
                     KeyCode::Char('{') => app.cycle_details_tab(false),
@@ -166,17 +161,24 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                         }
                     }
                     KeyCode::Enter => {
-                        if key
+                        let auto_open = !key
                             .modifiers
-                            .contains(crossterm::event::KeyModifiers::SHIFT)
-                        {
-                            app.start_selected_project(false);
-                        } else {
+                            .contains(crossterm::event::KeyModifiers::SHIFT);
+                        if app.active_pane == ActivePane::ProjectsList {
+                            // Stage one: focus the details pane; a second press launches.
+                            app.focus_details_for_launch();
+                        } else if auto_open {
                             app.start_selected_project(true);
+                        } else {
+                            app.start_selected_project(false);
                         }
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') => {
-                        app.start_selected_project(false);
+                        if app.active_pane == ActivePane::ProjectsList {
+                            app.focus_details_for_launch();
+                        } else {
+                            app.start_selected_project(false);
+                        }
                     }
                     KeyCode::Char('s') => {
                         let name = app.selected_project_name();
@@ -220,18 +222,7 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                         }
                     }
                     _ => {
-                        let input_req: Option<&mut tui_input::Input> = match app.active_field {
-                            FormField::Name => Some(&mut app.input_name),
-                            FormField::SshConnection => Some(&mut app.input_ssh),
-                            FormField::DbUrl => Some(&mut app.input_url),
-                            FormField::DbHost => Some(&mut app.input_host),
-                            FormField::DbPort => Some(&mut app.input_port),
-                            FormField::DbName => Some(&mut app.input_dbname),
-                            FormField::DbUser => Some(&mut app.input_dbuser),
-                            FormField::DbPass => Some(&mut app.input_dbpass),
-                            FormField::ConnectionType => None,
-                        };
-                        if let Some(input) = input_req {
+                        if let Some(input) = app.input_mut(app.active_field) {
                             input.handle_event(&Event::Key(key));
                         }
                     }

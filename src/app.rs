@@ -15,7 +15,6 @@ use tui_input::Input;
 pub enum ActivePane {
     ProjectsList,
     Details,
-    Logs,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -83,6 +82,15 @@ impl FormField {
                 FormField::DbUser,
                 FormField::DbPass,
             ],
+            ConnectionType::Local => &[
+                FormField::Name,
+                FormField::ConnectionType,
+                FormField::DbHost,
+                FormField::DbPort,
+                FormField::DbName,
+                FormField::DbUser,
+                FormField::DbPass,
+            ],
         }
     }
 
@@ -105,8 +113,8 @@ impl FormField {
                 "Examples: production-us-east, staging-db, app_db@ubuntu@192.168.1.5",
             ),
             FormField::ConnectionType => (
-                "How to reach the database. SSH tunnels through a remote server; URL connects directly.",
-                "Press Enter or Space to toggle between SSH and URL.",
+                "How to reach the database: SSH tunnels through a remote server, URL connects directly, Local talks to a database on this machine.",
+                "Press Enter or Space to cycle SSH -> URL -> Local. Choosing Local auto-fills the host with localhost.",
             ),
             FormField::SshConnection => (
                 "SSH connection string to reach the remote server hosting the Postgres database.",
@@ -117,8 +125,8 @@ impl FormField {
                 "Examples: postgresql://user:pass@host:5432/db — password is moved to your keychain on save.",
             ),
             FormField::DbHost => (
-                "Public host for a hosted database (used only if no full Connection URL is provided).",
-                "Examples: db.your-cluster.us-east-1.cockroachlabs.cloud",
+                "Host for a direct or local connection (used only if no full Connection URL is provided).",
+                "Examples: localhost (locally running Postgres), 127.0.0.1, db.your-cluster.us-east-1.cockroachlabs.cloud",
             ),
             FormField::DbPort => (
                 "The remote port Postgres is listening on. Leave blank to default to 5432.",
@@ -196,7 +204,7 @@ impl App {
 
             is_new_project: false,
             status_message: String::from(
-                "Ready. Press 'n' for New Project, 'Enter' to launch selected, '?' for help.",
+                "Ready. Press 'n' for New Project, 'Enter' to focus a project (again to launch), '?' for help.",
             ),
             error_message: None,
             logs: Arc::new(Mutex::new(Vec::new())),
@@ -212,6 +220,36 @@ impl App {
     pub fn add_log(&self, msg: String) {
         if let Ok(mut logs) = self.logs.lock() {
             logs.push(msg);
+        }
+    }
+
+    /// Read-only access to the `Input` backing a form field.
+    pub fn input(&self, field: FormField) -> Option<&Input> {
+        match field {
+            FormField::Name => Some(&self.input_name),
+            FormField::SshConnection => Some(&self.input_ssh),
+            FormField::DbUrl => Some(&self.input_url),
+            FormField::DbHost => Some(&self.input_host),
+            FormField::DbPort => Some(&self.input_port),
+            FormField::DbName => Some(&self.input_dbname),
+            FormField::DbUser => Some(&self.input_dbuser),
+            FormField::DbPass => Some(&self.input_dbpass),
+            FormField::ConnectionType => None,
+        }
+    }
+
+    /// Mutable access to the `Input` backing a form field.
+    pub fn input_mut(&mut self, field: FormField) -> Option<&mut Input> {
+        match field {
+            FormField::Name => Some(&mut self.input_name),
+            FormField::SshConnection => Some(&mut self.input_ssh),
+            FormField::DbUrl => Some(&mut self.input_url),
+            FormField::DbHost => Some(&mut self.input_host),
+            FormField::DbPort => Some(&mut self.input_port),
+            FormField::DbName => Some(&mut self.input_dbname),
+            FormField::DbUser => Some(&mut self.input_dbuser),
+            FormField::DbPass => Some(&mut self.input_dbpass),
+            FormField::ConnectionType => None,
         }
     }
 
@@ -274,8 +312,14 @@ impl App {
     pub fn toggle_connection_type(&mut self) {
         self.connection_type = match self.connection_type {
             ConnectionType::Ssh => ConnectionType::Url,
-            ConnectionType::Url => ConnectionType::Ssh,
+            ConnectionType::Url => ConnectionType::Local,
+            ConnectionType::Local => ConnectionType::Ssh,
         };
+        if self.connection_type == ConnectionType::Local
+            && self.input_host.value().trim().is_empty()
+        {
+            self.input_host = Input::from("localhost");
+        }
         self.active_field = FormField::ConnectionType;
     }
 
@@ -313,7 +357,7 @@ impl App {
         if name.is_empty() {
             let host = match self.connection_type {
                 ConnectionType::Ssh => ssh.clone(),
-                ConnectionType::Url => {
+                ConnectionType::Url | ConnectionType::Local => {
                     if db_host.is_empty() {
                         dbname.clone()
                     } else {
@@ -395,17 +439,6 @@ impl App {
 
     // --- Navigation ---
 
-    pub fn cycle_pane(&mut self, forward: bool) {
-        self.active_pane = match (self.active_pane, forward) {
-            (ActivePane::ProjectsList, true) => ActivePane::Details,
-            (ActivePane::Details, true) => ActivePane::Logs,
-            (ActivePane::Logs, true) => ActivePane::ProjectsList,
-            (ActivePane::ProjectsList, false) => ActivePane::Logs,
-            (ActivePane::Details, false) => ActivePane::ProjectsList,
-            (ActivePane::Logs, false) => ActivePane::Details,
-        };
-    }
-
     pub fn cycle_details_tab(&mut self, forward: bool) {
         self.details_tab = match (self.details_tab, forward) {
             (DetailsTab::Overview, true) => DetailsTab::Config,
@@ -464,6 +497,31 @@ impl App {
         })
     }
 
+    // --- Launch flow ---
+
+    /// Stage one of the two-step launch: focus the Details pane for the
+    /// selected project instead of launching immediately. A second press of
+    /// Enter / Shift+Enter / r while Details is focused performs the launch.
+    pub fn focus_details_for_launch(&mut self) {
+        if self.config.projects.is_empty() {
+            self.add_log("No project selected to connect.".to_string());
+            return;
+        }
+        let name = self.selected_project_name();
+        self.active_pane = ActivePane::Details;
+        self.status_message = format!(
+            "Selected '{}'. Press Enter to connect (opens browser when ready), Shift+Enter or r to run without opening.",
+            name
+        );
+    }
+
+    /// Jumps to the Details pane's Process tab so the user can watch the
+    /// session come up.
+    fn show_process_tab(&mut self) {
+        self.active_pane = ActivePane::Details;
+        self.details_tab = DetailsTab::Process;
+    }
+
     pub fn start_selected_project(&mut self, auto_open: bool) {
         if self.config.projects.is_empty() {
             self.add_log("No project selected to launch.".to_string());
@@ -485,6 +543,7 @@ impl App {
                 .unwrap_or(false);
             if running {
                 self.add_log(format!("Project '{}' is already running.", name));
+                self.show_process_tab();
                 return;
             }
             self.stop_session_for(&name);
@@ -509,6 +568,7 @@ impl App {
 
         self.sessions.push(session.clone());
         self.add_log(format!("Starting project '{}'...", name));
+        self.show_process_tab();
 
         let global_logs = self.logs.clone();
         std::thread::spawn(move || {
@@ -763,7 +823,7 @@ fn run_session(
                 return;
             }
         },
-        ConnectionType::Url => match proj.connection_url(None) {
+        ConnectionType::Url | ConnectionType::Local => match proj.connection_url(None) {
             Ok(url) => url,
             Err(e) => {
                 push_session_log(&session, format!("Connection error: {:#}", e));

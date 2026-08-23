@@ -17,6 +17,7 @@ pub enum ConnectionType {
     #[default]
     Ssh,
     Url,
+    Local,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -88,6 +89,23 @@ impl ProjectConfig {
                         self.db_user, pass, host, port, self.db_name
                     ))
                 }
+            }
+            ConnectionType::Local => {
+                let pass = self.get_password().unwrap_or_default();
+                let host = if self.db_host.trim().is_empty() {
+                    "localhost".to_string()
+                } else {
+                    self.db_host.trim().to_string()
+                };
+                let port = if self.db_port.trim().is_empty() {
+                    "5432".to_string()
+                } else {
+                    self.db_port.trim().to_string()
+                };
+                Ok(format!(
+                    "postgresql://{}:{}@{}:{}/{}",
+                    self.db_user, pass, host, port, self.db_name
+                ))
             }
         }
     }

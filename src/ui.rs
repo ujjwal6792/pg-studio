@@ -5,7 +5,7 @@ use crate::config::ConnectionType;
 use crate::session::SessionStatus;
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
@@ -122,6 +122,7 @@ fn draw_projects_list(f: &mut Frame, app: &App, area: Rect) {
                 let icon = match p.connection_type {
                     ConnectionType::Ssh => "󰒋",
                     ConnectionType::Url => "󰖟",
+                    ConnectionType::Local => "",
                 };
 
                 let bold = if selected {
@@ -250,13 +251,14 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(app.theme.text),
         )),
         Line::from(Span::styled(
-            format!(
-                " Connection Type   : {}",
-                match proj.connection_type {
-                    ConnectionType::Ssh => "SSH Tunnel",
-                    ConnectionType::Url => "Public URL",
-                }
-            ),
+                format!(
+                    " Connection Type   : {}",
+                    match proj.connection_type {
+                        ConnectionType::Ssh => "SSH Tunnel",
+                        ConnectionType::Url => "Public URL",
+                        ConnectionType::Local => "Local",
+                    }
+                ),
             Style::default().fg(app.theme.text),
         )),
     ];
@@ -288,6 +290,16 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(app.theme.text),
                 )));
             }
+        }
+        ConnectionType::Local => {
+            lines.push(Line::from(Span::styled(
+                format!(" Host              : {}", proj.db_host),
+                Style::default().fg(app.theme.text),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(" Port              : {}", proj.db_port),
+                Style::default().fg(app.theme.text),
+            )));
         }
     }
 
@@ -335,8 +347,9 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
         FormField::ConnectionType,
         "Connection Type".to_string(),
         match app.connection_type {
-            ConnectionType::Ssh => "SSH (Enter to toggle)".to_string(),
-            ConnectionType::Url => "URL (Enter to toggle)".to_string(),
+            ConnectionType::Ssh => "SSH (Enter to cycle)".to_string(),
+            ConnectionType::Url => "URL (Enter to cycle)".to_string(),
+            ConnectionType::Local => "Local (Enter to cycle)".to_string(),
         },
         false,
     ));
@@ -357,6 +370,14 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
                 app.input_url.value().to_string(),
                 false,
             ));
+            fields.push((
+                FormField::DbHost,
+                "Database Host".to_string(),
+                app.input_host.value().to_string(),
+                false,
+            ));
+        }
+        ConnectionType::Local => {
             fields.push((
                 FormField::DbHost,
                 "Database Host".to_string(),
@@ -416,7 +437,6 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
                     "5432 (default)".to_string(),
                     Style::default()
                         .fg(app.theme.text)
-                        .bg(app.theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
@@ -439,7 +459,6 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
                     if is_active {
                         Style::default()
                             .fg(app.theme.text)
-                            .bg(app.theme.accent)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(app.theme.text)
@@ -452,7 +471,6 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
                 if is_active {
                     Style::default()
                         .fg(app.theme.text)
-                        .bg(app.theme.accent)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(app.theme.text)
@@ -477,6 +495,25 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
         ]);
 
         f.render_widget(Paragraph::new(line), chunks[idx]);
+
+        // Show the terminal caret at the input's visual cursor position so the
+        // user can see where edits (arrows, backspace) will land.
+        if is_active {
+            const VALUE_COL: usize = 21; // 3 (" ▶ ") + 16 (label) + 2 (": ")
+            let width = chunks[idx].width as usize;
+            if width > VALUE_COL + 1 {
+                let avail = width - VALUE_COL;
+                let cursor = app
+                    .input(*field_type)
+                    .map(|i| i.visual_cursor())
+                    .unwrap_or(0);
+                let col = VALUE_COL + cursor.min(avail - 1);
+                f.set_cursor_position(Position {
+                    x: chunks[idx].x + col as u16,
+                    y: chunks[idx].y,
+                });
+            }
+        }
     }
 
     // Render Last Opened Date
@@ -495,7 +532,7 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
     {
         let err_line = Line::from(vec![
             Span::styled(
-                "   ⚠️ Error: ",
+                "    Error: ",
                 Style::default()
                     .fg(app.theme.error)
                     .add_modifier(Modifier::BOLD),
@@ -511,7 +548,7 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
 
     if app.sessions.is_empty() {
         lines.push(Line::from(Span::styled(
-            "No running studios. Press Enter to launch+open, or Shift+Enter / r to just launch.",
+            "No running studios. Press Enter to focus a project's details, then Enter again to launch.",
             Style::default().fg(app.theme.muted),
         )));
     } else {
@@ -602,18 +639,17 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
-    let log_border_style = if app.active_pane == ActivePane::Logs {
-        Style::default().fg(app.theme.accent)
-    } else {
-        Style::default().fg(app.theme.muted)
-    };
+    let log_border_style = Style::default().fg(app.theme.muted);
 
     let (bottom_title, bottom_content) = match app.mode {
         AppMode::EditingForm => {
             let (desc, example) = app.active_field.get_help();
             (
                 format!(" Field Guide: {:?} ", app.active_field),
-                format!("💡 {}\n\n📌 {}", desc, example),
+                format!(
+                    "{} {}\n\n{} {}",
+                    '\u{f0eb}', desc, '\u{f02b}', example
+                ),
             )
         }
         _ => {
@@ -647,13 +683,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.mode {
         AppMode::Normal => match app.active_pane {
             ActivePane::ProjectsList => {
-                " [←/→] Pane | [n] New | [e] Edit | [d] Delete | [Enter] Launch+Open | [⇧Enter/r] Launch | [s] Stop | [o] Open URL | [c] Copy URL | [?] Help | [q] Quit"
+                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [n] New | [e] Edit | [d] Delete | [Enter] Focus details · again to launch | [s] Stop | [o] Open URL | [c] Copy URL | [?] Help | [q] Quit"
             }
             ActivePane::Details => {
-                " [[/]] Sub-tab | [e] Edit | [Enter] Launch+Open | [⇧Enter/r] Launch | [s] Stop | [o] Open URL | [c] Copy URL | [?] Help | [q] Quit"
-            }
-            ActivePane::Logs => {
-                " [←/→] Pane | [Enter] Launch+Open | [⇧Enter/r] Launch | [s] Stop | [o] Open URL | [c] Copy URL | [?] Help | [q] Quit"
+                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [e] Edit | [Enter] Connect+Open Browser | [⇧Enter/r] Run | [s] Stop | [o] Open URL | [c] Copy URL | [?] Help | [q] Quit"
             }
         },
         AppMode::EditingForm => {
@@ -813,9 +846,14 @@ fn render_help_popup(f: &mut Frame, app: &App) {
         (
             "Navigation",
             &[
-                ("←/→ or Tab", "Switch pane (Projects / Details / Logs)"),
                 (
-                    "[ / ]",
+                    "← / →",
+                    "Focus Projects list / Details pane",
+                ),
+                ("[ or ]", "Flip focus between Projects and Details"),
+                ("1 / 2", "Jump to Projects / Details"),
+                (
+                    "Tab / Shift+Tab",
                     "Cycle Details sub-tabs (Overview / Config / Process)",
                 ),
                 (
@@ -831,15 +869,21 @@ fn render_help_popup(f: &mut Frame, app: &App) {
                 ("n", "New project"),
                 ("e", "Edit selected project"),
                 ("d", "Delete selected project"),
-                ("Enter", "Launch studio + auto-open browser when ready"),
-                ("Shift+Enter / r", "Launch studio without opening browser"),
+                (
+                    "Enter",
+                    "Focus details pane; press again to launch + open browser when ready",
+                ),
+                (
+                    "Shift+Enter / r",
+                    "Focus details pane; press again to launch without opening browser",
+                ),
                 ("s", "Stop selected project's studio"),
             ],
         ),
         (
             "Editing",
             &[
-                ("Enter / Space", "Toggle Connection Type (SSH vs URL)"),
+                ("Enter / Space", "Cycle Connection Type (SSH -> URL -> Local)"),
                 ("Tab / ↓", "Next field"),
                 ("Shift+Tab / ↑", "Previous field"),
                 ("Enter", "Save project"),
