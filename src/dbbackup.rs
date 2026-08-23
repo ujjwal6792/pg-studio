@@ -235,7 +235,7 @@ fn spawn_and_wait(
         let redact = password.to_string();
         let log_line = log_line.clone();
         std::thread::spawn(move || {
-            for line in BufRead::lines(std::io::BufReader::new(stderr)).flatten() {
+            for line in BufRead::lines(std::io::BufReader::new(stderr)).map_while(Result::ok) {
                 if line.contains(&redact) && !redact.is_empty() {
                     log_line(line.replace(&redact, "***"));
                 } else {
@@ -254,4 +254,58 @@ fn spawn_and_wait(
         bail!("pg_dump produced an empty file");
     }
     Ok(size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dump_args_cover_connection_target_and_format() {
+        let out = Path::new("/tmp/x.dump");
+        let args = build_dump_args("127.0.0.1", 5433, "alice", "app", out, DumpFormat::Custom);
+        let expected = [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "5433",
+            "--username",
+            "alice",
+            "--no-owner",
+            "--no-privileges",
+            "--file",
+            "/tmp/x.dump",
+            "--format=custom",
+            "app",
+        ];
+        assert_eq!(
+            args,
+            expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+        // The password must never travel through argv.
+        assert!(!args.join(" ").contains("PGPASSWORD"));
+    }
+
+    #[test]
+    fn format_from_path_uses_extension() {
+        assert_eq!(
+            DumpFormat::from_path(Path::new("/tmp/a.sql")),
+            DumpFormat::Plain
+        );
+        assert_eq!(
+            DumpFormat::from_path(Path::new("/tmp/b.dump")),
+            DumpFormat::Custom
+        );
+        assert_eq!(
+            DumpFormat::from_path(Path::new("/tmp/noext")),
+            DumpFormat::Custom
+        );
+    }
+
+    #[test]
+    fn human_size_formats_units() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(2048), "2.0 KiB");
+        assert_eq!(human_size(5 * 1024 * 1024), "5.0 MiB");
+    }
 }

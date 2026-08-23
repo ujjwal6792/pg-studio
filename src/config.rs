@@ -375,3 +375,32 @@ mod bundle_tests {
         assert_eq!(parsed.version, 1);
     }
 }
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn project(name: &str) -> ProjectConfig {
+        ProjectConfig {
+            name: name.into(),
+            connection_type: ConnectionType::Ssh,
+            ssh_connection: "user@host".into(),
+            db_url: String::new(),
+            db_host: String::new(),
+            db_port: "5432".into(),
+            db_name: "db".into(),
+            db_user: "user".into(),
+            last_opened: 0,
+        }
+    }
+
+    #[test]
+    fn merge_imports_new_and_skips_existing() {
+        let mut config = AppConfig::with_projects(vec![project("existing")]);
+        let bundle = ProjectBundle::new(vec![project("existing"), project("fresh")]);
+        let (imported, skipped) = config.merge_bundle(&bundle);
+        assert_eq!((imported, skipped), (1, 1));
+        assert_eq!(config.projects.len(), 2);
+        assert!(config.projects.iter().any(|p| p.name == "fresh"));
+    }
+}

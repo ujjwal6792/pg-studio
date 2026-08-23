@@ -49,3 +49,50 @@ pub fn read_backup(path: &Path) -> Result<ProjectBundle> {
     }
     Ok(bundle)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(tag: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("pg-studio-test-{tag}-{stamp}.json"))
+    }
+
+    fn sample_projects() -> Vec<ProjectConfig> {
+        vec![ProjectConfig {
+            name: "test-proj".into(),
+            connection_type: crate::config::ConnectionType::Local,
+            ssh_connection: String::new(),
+            db_url: String::new(),
+            db_host: "localhost".into(),
+            db_port: "5432".into(),
+            db_name: "postgres".into(),
+            db_user: "postgres".into(),
+            last_opened: 7,
+        }]
+    }
+
+    #[test]
+    fn backup_round_trips_through_disk() {
+        let path = temp_path("roundtrip");
+        write_backup(&path, sample_projects()).expect("write");
+        let bundle = read_backup(&path).expect("read");
+        assert_eq!(bundle.version, 1);
+        assert_eq!(bundle.projects.len(), 1);
+        assert_eq!(bundle.projects[0].name, "test-proj");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn backup_refuses_to_overwrite() {
+        let path = temp_path("overwrite");
+        write_backup(&path, sample_projects()).expect("first write");
+        let err = write_backup(&path, sample_projects());
+        assert!(err.is_err(), "second write must fail");
+        let _ = fs::remove_file(&path);
+    }
+}
