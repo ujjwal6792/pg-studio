@@ -65,6 +65,10 @@ enum Commands {
         /// Format override: "custom" or "sql" (default: from extension, else custom)
         #[arg(long)]
         format: Option<String>,
+        /// If pg_dump is missing, open an installer terminal via the detected
+        /// package manager instead of failing.
+        #[arg(long)]
+        install: bool,
     },
 }
 
@@ -157,14 +161,48 @@ fn run_command(command: Commands) -> Result<()> {
             project,
             out,
             format,
+            install,
         } => {
-            run_dump_command(project, out, format)?;
+            run_dump_command(project, out, format, install)?;
         }
     }
     Ok(())
 }
 
-fn run_dump_command(project: String, out: Option<PathBuf>, format: Option<String>) -> Result<()> {
+fn run_dump_command(
+    project: String,
+    out: Option<PathBuf>,
+    format: Option<String>,
+    install: bool,
+) -> Result<()> {
+    // Offer a guided install when pg_dump is missing.
+    if pg_studio::dbbackup::find_pg_dump().is_none() {
+        match pg_studio::installer::detect_package_manager() {
+            Some(pm) if install => {
+                let script = pg_studio::installer::open_installer_terminal(pm)?;
+                println!(
+                    "Installer opened in a new terminal window (script: {}).",
+                    script.display()
+                );
+                println!("Complete it there, then rerun this command.");
+                return Ok(());
+            }
+            Some(pm) => {
+                eprintln!(
+                    "pg_dump is not installed. Install via {} with:\n  {}\nOr rerun with --install to open an installer terminal.",
+                    pm.name(),
+                    pg_studio::installer::suggest_command(pm)
+                );
+                std::process::exit(1);
+            }
+            None => {
+                eprintln!(
+                    "pg_dump not found and no supported package manager detected. Install the PostgreSQL client tools manually, e.g. brew install libpq."
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     let config = AppConfig::load()?;
     let proj = config
         .projects
@@ -562,11 +600,34 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                     app.confirm_action = None;
                     app.mode = AppMode::Normal;
                 }
+                Some(ConfirmationAction::MissingPgDump) => {
+                    let pm = app.pending_pkg_manager.take();
+                    app.confirm_action = None;
+                    app.mode = AppMode::Normal;
+                    if let Some(pm) = pm {
+                        match pg_studio::installer::open_installer_terminal(pm) {
+                            Ok(_) => {
+                                app.add_log(format!(
+                                    "Installer opened in a new terminal window ({}).",
+                                    pg_studio::installer::suggest_command(pm)
+                                ));
+                                app.add_log(
+                                    "Complete the install there, then press b and retry the dump."
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                app.add_log(format!("Could not open installer terminal: {:#}", e))
+                            }
+                        }
+                    }
+                }
                 None => app.mode = AppMode::Normal,
             },
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 let was_cancel_edit = app.confirm_action == Some(ConfirmationAction::CancelEdit);
                 app.confirm_action = None;
+                app.pending_pkg_manager = None;
                 app.mode = if was_cancel_edit {
                     AppMode::EditingForm
                 } else {

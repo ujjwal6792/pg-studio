@@ -1024,6 +1024,20 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
             ),
             app.theme.warn,
         ),
+        ConfirmationAction::MissingPgDump => {
+            let pm = app
+                .pending_pkg_manager
+                .expect("MissingPgDump requires a detected manager");
+            (
+                " Install pg_dump ",
+                format!(
+                    "pg_dump is not installed. Install it now via {}?\n\n$ {}",
+                    pm.name(),
+                    crate::installer::suggest_command(pm)
+                ),
+                app.theme.accent,
+            )
+        }
     };
 
     let term = f.area();

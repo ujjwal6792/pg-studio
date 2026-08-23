@@ -51,6 +51,9 @@ pub enum ConfirmationAction {
     CancelEdit,
     Quit,
     StopProject,
+    /// pg_dump is missing; Enter opens a package-manager installer in an
+    /// external terminal (manager stored in `pending_pkg_manager`).
+    MissingPgDump,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +174,8 @@ pub struct App {
     // Backup menu ('b')
     pub backup_menu_idx: usize,
     pub input_backup_path: Input,
+    /// Package manager chosen for a pending pg_dump install confirmation.
+    pub pending_pkg_manager: Option<crate::installer::PackageManager>,
 
     /// Background pg_dump jobs shown in the Process tab.
     pub jobs: Vec<Arc<Mutex<Job>>>,
@@ -240,6 +245,7 @@ impl App {
 
             backup_menu_idx: 0,
             input_backup_path: Input::default(),
+            pending_pkg_manager: None,
 
             jobs: Vec::new(),
 
@@ -630,6 +636,28 @@ impl App {
             2 => {
                 if self.config.projects.is_empty() {
                     self.add_log("Dump aborted: no project selected.".to_string());
+                    return;
+                }
+                if dbbackup::find_pg_dump().is_none() {
+                    match crate::installer::detect_package_manager() {
+                        Some(pm) => {
+                            self.pending_pkg_manager = Some(pm);
+                            self.confirm_action = Some(ConfirmationAction::MissingPgDump);
+                            self.mode = AppMode::ConfirmDialog;
+                        }
+                        None => {
+                            self.add_log(
+                                "pg_dump not found and no supported package manager detected."
+                                    .to_string(),
+                            );
+                            self.add_log(
+                                "Install the PostgreSQL client tools manually, e.g.:".to_string(),
+                            );
+                            self.add_log("  brew install libpq".to_string());
+                            self.add_log("  sudo apt install postgresql-client".to_string());
+                            self.add_log("  sudo pacman -S postgresql-libs".to_string());
+                        }
+                    }
                     return;
                 }
                 let proj = self.config.projects[self.selected_project_idx].clone();
@@ -1527,6 +1555,7 @@ mod tests {
             log_scroll: 0,
             backup_menu_idx: 0,
             input_backup_path: Input::default(),
+            pending_pkg_manager: None,
             jobs: Vec::new(),
             input_name: Input::from("n"),
             input_ssh: Input::from("s"),

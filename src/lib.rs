@@ -4,6 +4,7 @@ pub mod check;
 pub mod config;
 pub mod dbbackup;
 pub mod drizzle;
+pub mod installer;
 pub mod open;
 pub mod persist;
 pub mod session;
