@@ -5,12 +5,15 @@ use crossterm::event::{
 };
 use pg_studio::{
     app::{ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField},
+    backup,
+    config::AppConfig,
     theme,
     tui::Tui,
     ui::{content_areas, draw},
     updater::{check_for_update, update_cli},
 };
 use ratatui::layout::Rect;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tui_input::backend::crossterm::EventHandler;
 
@@ -35,6 +38,23 @@ struct Cli {
     /// Print version.
     #[arg(short = 'v', long = "version", visible_short_alias = 'V')]
     version: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Write a password-free backup of all projects to a JSON file.
+    Backup {
+        /// Destination file (default: ~/Downloads/pg-studio-backup-<timestamp>.json)
+        file: Option<PathBuf>,
+    },
+    /// Merge projects from a backup file into your config (skips existing names).
+    Restore {
+        /// Backup file to read
+        file: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -67,6 +87,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Some(command) = cli.command {
+        return run_command(command);
+    }
+
     let mut app = App::new()?;
     let mut tui = Tui::new()?;
     tui.enter()?;
@@ -83,6 +107,42 @@ fn main() -> Result<()> {
         eprintln!("Error: {:?}", err);
     }
 
+    Ok(())
+}
+
+fn run_command(command: Commands) -> Result<()> {
+    match command {
+        Commands::Backup { file } => {
+            let config = AppConfig::load()?;
+            if config.projects.is_empty() {
+                eprintln!("No projects to back up.");
+                std::process::exit(1);
+            }
+            let path = match file {
+                Some(f) => f,
+                None => backup::default_backup_path()?,
+            };
+            backup::write_backup(&path, config.projects.clone())?;
+            println!(
+                "Backup written: {} ({} project(s), passwords not included)",
+                path.display(),
+                config.projects.len()
+            );
+        }
+        Commands::Restore { file } => {
+            let mut config = AppConfig::load()?;
+            let bundle = backup::read_backup(&file)?;
+            let total = bundle.projects.len();
+            let (imported, skipped) = config.merge_bundle(&bundle);
+            if imported > 0 {
+                config.save()?;
+            }
+            println!(
+                "Restored from {}: {imported} imported, {skipped} skipped ({total} in file).",
+                file.display()
+            );
+        }
+    }
     Ok(())
 }
 

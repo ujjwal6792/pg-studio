@@ -212,6 +212,22 @@ impl AppConfig {
 
     /// Path of the portable project bundle written by `x` / read by `i`.
     /// Passwords never appear here: they stay in the OS keychain.
+    /// Merges a bundle's projects into this config, skipping names that
+    /// already exist. Returns `(imported, skipped)`. Does NOT save.
+    pub fn merge_bundle(&mut self, bundle: &ProjectBundle) -> (usize, usize) {
+        let mut imported = 0;
+        let mut skipped = 0;
+        for project in &bundle.projects {
+            if self.projects.iter().any(|p| p.name == project.name) {
+                skipped += 1;
+                continue;
+            }
+            self.projects.push(project.clone());
+            imported += 1;
+        }
+        (imported, skipped)
+    }
+
     pub fn export_file_path() -> Result<PathBuf> {
         let proj_dirs = ProjectDirs::from("com", "dbstudio", "pg-studio")
             .context("Could not determine project directories")?;

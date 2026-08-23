@@ -523,16 +523,7 @@ impl App {
     /// Merges projects from any backup bundle into the live config,
     /// skipping names that already exist.
     pub fn merge_bundle(&mut self, bundle: ProjectBundle) -> (usize, usize) {
-        let mut imported = 0;
-        let mut skipped = 0;
-        for project in bundle.projects {
-            if self.config.projects.iter().any(|p| p.name == project.name) {
-                skipped += 1;
-                continue;
-            }
-            self.config.projects.push(project);
-            imported += 1;
-        }
+        let (imported, skipped) = self.config.merge_bundle(&bundle);
         if imported > 0
             && let Err(e) = self.config.save()
         {
