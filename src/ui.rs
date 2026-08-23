@@ -376,9 +376,14 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
     )));
 
     let running = app.is_project_running(&proj.name);
+    let uptime_suffix = app
+        .selected_session()
+        .and_then(|s| s.lock().ok().and_then(|g| g.uptime()))
+        .map(|up| format!(" (up {up})"))
+        .unwrap_or_default();
     let status_line = if running {
         Span::styled(
-            " Status            : ● Running",
+            format!(" Status            : ● Running{uptime_suffix}"),
             Style::default()
                 .fg(app.theme.success)
                 .add_modifier(Modifier::BOLD),
@@ -640,6 +645,23 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
                     Span::styled(format!(" {} {} ", marker, s.project_name), name_style),
                     Span::styled(format!("[{}]", status_text), Style::default().fg(color)),
                 ]));
+                // Detail line: pid · port · uptime
+                let mut bits: Vec<String> = Vec::new();
+                if let Some(pid) = s.studio_pid {
+                    bits.push(format!("pid {pid}"));
+                }
+                if s.ssh.is_some() || s.ssh_pid.is_some() {
+                    bits.push("ssh tunnel".to_string());
+                }
+                bits.push(format!("port {}", s.studio_port));
+                match s.uptime() {
+                    Some(up) => bits.push(format!("up {up}")),
+                    None => bits.push("detached".to_string()),
+                }
+                lines.push(Line::from(Span::styled(
+                    format!("     {}", bits.join(" · ")),
+                    Style::default().fg(app.theme.muted),
+                )));
                 if let Some(url) = s.url().map(|u| u.to_string()) {
                     lines.push(Line::from(vec![
                         Span::styled("     ", Style::default()),

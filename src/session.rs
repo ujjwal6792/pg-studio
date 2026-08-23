@@ -26,6 +26,9 @@ pub struct RunningSession {
     pub studio_pid: Option<u32>,
     pub ssh_pid: Option<u32>,
     pub log_path: Option<PathBuf>,
+    /// Unix timestamp (secs) when the session started; `None` for restored
+    /// detached sessions whose original start time is unknown.
+    pub started_at: Option<i64>,
 }
 
 impl RunningSession {
@@ -56,5 +59,21 @@ impl RunningSession {
 
     pub fn url(&self) -> Option<&str> {
         self.tunnel_url.as_deref()
+    }
+
+    /// Human-readable uptime since `started_at`, e.g. "2h 5m" or "48s".
+    pub fn uptime(&self) -> Option<String> {
+        let started = self.started_at?;
+        let secs = (chrono::Utc::now().timestamp() - started).max(0);
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        let s = secs % 60;
+        Some(if h > 0 {
+            format!("{h}h {m}m")
+        } else if m > 0 {
+            format!("{m}m {s}s")
+        } else {
+            format!("{s}s")
+        })
     }
 }

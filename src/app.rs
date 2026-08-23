@@ -774,6 +774,7 @@ impl App {
             studio_pid: None,
             ssh_pid: None,
             log_path: None,
+            started_at: Some(chrono::Utc::now().timestamp()),
         }));
 
         self.sessions.push(session.clone());
@@ -875,6 +876,7 @@ impl App {
                     studio_pid: Some(entry.studio_pid),
                     ssh_pid: entry.ssh_pid,
                     log_path: Some(log_path.clone()),
+                    started_at: None, // detached: original start time unknown
                 }));
                 let session_clone = session.clone();
                 let global = self.logs.clone();
