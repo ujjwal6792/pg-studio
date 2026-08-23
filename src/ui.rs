@@ -3,6 +3,7 @@ use crate::app::{
 };
 use crate::config::{ConnectionType, ProjectConfig};
 use crate::session::SessionStatus;
+use crate::theme::Theme;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
@@ -764,27 +765,117 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let help_text = match app.mode {
+    // (key, description) pairs ordered by importance. The LAST pair must be
+    // the cheatsheet entry - it is always rendered regardless of width.
+    let items: Vec<(&str, &str)> = match app.mode {
         AppMode::Normal => match app.active_pane {
-            ActivePane::ProjectsList => {
-                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [n] New | [e] Edit | [p] Dup | [d] Delete | [/] Filter | [t] Test conn | [Enter] Focus details · again to launch | [s] Stop | [o/c] URL | [PgUp/Dn] Logs | [?] Help | [q] Quit"
-            }
-            ActivePane::Details => {
-                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [e] Edit | [t] Test conn | [Enter] Connect+Open Browser | [⇧Enter/r] Run | [s] Stop | [o/c] URL | [?] Help | [q] Quit"
-            }
+            ActivePane::ProjectsList => vec![
+                ("←/→", "Pane"),
+                ("Tab", "Tabs"),
+                ("⏎", "Connect"),
+                ("⇧⏎/r", "Run"),
+                ("n", "New"),
+                ("e", "Edit"),
+                ("p", "Dup"),
+                ("d", "Del"),
+                ("/", "Filter"),
+                ("t", "Test"),
+                ("s", "Stop"),
+                ("o/c", "URL"),
+                ("Pg↑/↓", "Logs"),
+                ("q", "Quit"),
+                ("?", "Help"),
+            ],
+            ActivePane::Details => vec![
+                ("←/→", "Pane"),
+                ("Tab", "Tabs"),
+                ("⏎", "Connect"),
+                ("r", "Run"),
+                ("e", "Edit"),
+                ("t", "Test"),
+                ("s", "Stop"),
+                ("o/c", "URL"),
+                ("q", "Quit"),
+                ("?", "Help"),
+            ],
         },
-        AppMode::EditingForm => {
-            " [Tab/Down] Next Field | [Shift+Tab/Up] Prev Field | [Enter] Save/Toggle | [Esc] Cancel Edit"
-        }
-        AppMode::Filtering => {
-            " Type to filter | [↑/↓] Navigate results | [Enter] Apply | [Esc] Clear filter"
-        }
-        AppMode::ConfirmDialog => " [Enter/y] Confirm | [Esc/n] Cancel",
-        AppMode::Help => " [Esc/?/q] Close Help",
+        AppMode::EditingForm => vec![
+            ("Tab/↓", "Next"),
+            ("⇧Tab/↑", "Prev"),
+            ("⏎", "Save/Toggle"),
+            ("Esc", "Cancel"),
+        ],
+        AppMode::Filtering => vec![
+            ("Type", "Filter"),
+            ("↑/↓", "Results"),
+            ("⏎", "Apply"),
+            ("Esc", "Clear"),
+        ],
+        AppMode::ConfirmDialog => vec![("⏎/y", "Confirm"), ("Esc/n", "Cancel")],
+        AppMode::Help => vec![("Esc/?/q", "Close")],
     };
 
-    let footer = Paragraph::new(Span::styled(help_text, Style::default().fg(app.theme.warn)));
-    f.render_widget(footer, area);
+    let spans = fit_footer_items(&items, &app.theme, area.width);
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Renders `(key, desc)` pairs as styled spans, keeping as many of the
+/// highest-priority items as the width allows. The final item is always kept
+/// so the cheatsheet binding stays visible on narrow terminals.
+fn fit_footer_items(items: &[(&str, &str)], theme: &Theme, avail: u16) -> Vec<Span<'static>> {
+    const SEP: &str = " │ ";
+    const SEP_W: usize = 3;
+
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let key_style = Style::default().fg(theme.warn).add_modifier(Modifier::BOLD);
+    let desc_style = Style::default().fg(theme.dim);
+    let sep_style = Style::default().fg(theme.muted);
+    let item_w = |item: &(&str, &str)| item.0.chars().count() + 1 + item.1.chars().count();
+
+    let (head, tail) = items.split_at(items.len() - 1);
+    let help = tail[0];
+    let help_w = SEP_W + item_w(&help);
+
+    // Space available for head items once room for Help is reserved.
+    let budget = (avail as usize).saturating_sub(help_w);
+
+    let mut included = 0usize;
+    let mut used = 0usize;
+    for item in head {
+        let w = item_w(item) + if included == 0 { 0 } else { SEP_W };
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        included += 1;
+    }
+
+    let mut spans = Vec::with_capacity(included * 3 + 3);
+    for item in &head[..included] {
+        if included > 0 && !spans.is_empty() {
+            spans.push(Span::styled(SEP, sep_style));
+        }
+        spans.push(Span::styled(item.0.to_string(), key_style));
+        spans.push(Span::styled(format!(" {}", item.1), desc_style));
+    }
+
+    let hidden = head.len() - included;
+    if hidden > 0 {
+        let hint = format!(" +{hidden}");
+        if used + hint.chars().count() <= budget {
+            spans.push(Span::styled(hint, sep_style));
+        }
+    }
+
+    if !spans.is_empty() {
+        spans.push(Span::styled(SEP, sep_style));
+    }
+    spans.push(Span::styled(help.0.to_string(), key_style));
+    spans.push(Span::styled(format!(" {}", help.1), desc_style));
+    spans
 }
 
 fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
@@ -1097,5 +1188,47 @@ mod tests {
         // A word longer than the width still lands on its own line.
         let wrapped = wrap_text("abcdefghij", 5);
         assert_eq!(wrapped, vec!["abcdefghij".to_string()]);
+    }
+
+    #[test]
+    fn footer_always_ends_with_last_item() {
+        let theme = Theme::default();
+        let items = vec![("n", "New"), ("e", "Edit"), ("?", "Help")];
+        for width in [20u16, 40, 80, 200] {
+            let spans = fit_footer_items(&items, &theme, width);
+            let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.ends_with("? Help"), "width {width}: {text}");
+        }
+    }
+
+    #[test]
+    fn footer_drops_low_priority_items_on_narrow_width() {
+        let theme = Theme::default();
+        let items = vec![
+            ("⏎", "Connect"),
+            ("n", "New"),
+            ("e", "Edit"),
+            ("/", "Filter"),
+            ("?", "Help"),
+        ];
+        let wide = fit_footer_items(&items, &theme, 200);
+        let wide_text: String = wide.iter().map(|s| s.content.as_ref()).collect();
+        assert!(wide_text.contains("Filter"));
+
+        let narrow = fit_footer_items(&items, &theme, 24);
+        let narrow_text: String = narrow.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!narrow_text.contains("Filter"));
+        assert!(narrow_text.contains("+")); // hidden-count hint
+        assert!(narrow_text.ends_with("? Help"));
+    }
+
+    #[test]
+    fn footer_no_bracket_nesting_in_normal_mode() {
+        // The old "[[/]]" notation must not come back.
+        let theme = Theme::default();
+        let items = vec![("[/]", "Flip"), ("?", "Help")];
+        let spans = fit_footer_items(&items, &theme, 200);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("[["));
     }
 }
