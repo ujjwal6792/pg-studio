@@ -347,6 +347,45 @@ impl App {
         self.mode = AppMode::EditingForm;
     }
 
+    /// Clones the selected project's settings into a fresh "… (copy)" draft
+    /// and opens it in the editor. Nothing is persisted until the user saves.
+    pub fn duplicate_selected_project(&mut self) {
+        let Some(src) = self.config.projects.get(self.selected_project_idx).cloned() else {
+            return;
+        };
+
+        let base = format!("{} (copy)", src.name);
+        let mut name = base.clone();
+        let mut counter = 2;
+        while self.config.projects.iter().any(|p| p.name == name) {
+            name = format!("{base} {counter}");
+            counter += 1;
+        }
+
+        self.input_name = Input::from(name);
+        self.connection_type = src.connection_type;
+        self.input_ssh = Input::from(src.ssh_connection.clone());
+        self.input_url = Input::from(src.db_url.clone());
+        self.input_host = Input::from(src.db_host.clone());
+        self.input_port = if src.db_port == "5432" {
+            Input::default()
+        } else {
+            Input::from(src.db_port.clone())
+        };
+        self.input_dbname = Input::from(src.db_name.clone());
+        self.input_dbuser = Input::from(src.db_user.clone());
+        self.input_dbpass = match src.get_password() {
+            Ok(pass) => Input::from(pass),
+            Err(_) => Input::default(),
+        };
+        self.error_message = None;
+        self.is_new_project = true;
+
+        self.active_pane = ActivePane::Details;
+        self.details_tab = DetailsTab::Config;
+        self.mode = AppMode::EditingForm;
+    }
+
     pub fn toggle_connection_type(&mut self) {
         self.connection_type = match self.connection_type {
             ConnectionType::Ssh => ConnectionType::Url,

@@ -132,6 +132,9 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                             app.prepare_edit_mode();
                         }
                     }
+                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                        app.duplicate_selected_project();
+                    }
                     KeyCode::Char('d') | KeyCode::Backspace => {
                         if app.active_pane == ActivePane::ProjectsList
                             && !app.config.projects.is_empty()
