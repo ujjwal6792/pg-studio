@@ -1,3 +1,4 @@
+use crate::check;
 use crate::config::{AppConfig, ConnectionType, ProjectConfig};
 use crate::drizzle::{check_dependencies, extract_tunnel_url, prepare_workspace, spawn_studio};
 use crate::open::{copy_to_clipboard, open_url};
@@ -526,6 +527,23 @@ impl App {
     }
 
     // --- Launch flow ---
+
+    /// Verifies the selected project is reachable without launching Studio.
+    /// Runs on a background thread; results are written to the Logs pane.
+    pub fn test_selected_connection(&mut self) {
+        if self.config.projects.is_empty() {
+            self.add_log("No project selected to test.".to_string());
+            return;
+        }
+        let proj = self.config.projects[self.selected_project_idx].clone();
+        let name = proj.name.clone();
+        self.add_log(format!("Testing connection for '{name}'..."));
+        let logs = self.logs.clone();
+        std::thread::spawn(move || match check::check_connection(&proj) {
+            Ok(msg) => add_global_log(&logs, format!("Connection OK: {msg}")),
+            Err(e) => add_global_log(&logs, format!("Connection FAILED: {:#}", e)),
+        });
+    }
 
     /// Stage one of the two-step launch: focus the Details pane for the
     /// selected project instead of launching immediately. A second press of

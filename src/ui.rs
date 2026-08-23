@@ -683,10 +683,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.mode {
         AppMode::Normal => match app.active_pane {
             ActivePane::ProjectsList => {
-                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [n] New | [e] Edit | [d] Delete | [Enter] Focus details · again to launch | [s] Stop | [o] Open URL | [c] Copy URL | [?] Help | [q] Quit"
+                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [n] New | [e] Edit | [d] Delete | [t] Test conn | [Enter] Focus details · again to launch | [s] Stop | [o/c] URL | [?] Help | [q] Quit"
             }
             ActivePane::Details => {
-                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [e] Edit | [Enter] Connect+Open Browser | [⇧Enter/r] Run | [s] Stop | [o] Open URL | [c] Copy URL | [?] Help | [q] Quit"
+                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [e] Edit | [t] Test conn | [Enter] Connect+Open Browser | [⇧Enter/r] Run | [s] Stop | [o/c] URL | [?] Help | [q] Quit"
             }
         },
         AppMode::EditingForm => {
@@ -877,6 +877,7 @@ fn render_help_popup(f: &mut Frame, app: &App) {
                     "Shift+Enter / r",
                     "Focus details pane; press again to launch without opening browser",
                 ),
+                ("t", "Test connection reachability without launching"),
                 ("s", "Stop selected project's studio"),
             ],
         ),

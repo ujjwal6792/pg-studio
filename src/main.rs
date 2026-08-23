@@ -180,6 +180,9 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                             app.start_selected_project(false);
                         }
                     }
+                    KeyCode::Char('t') => {
+                        app.test_selected_connection();
+                    }
                     KeyCode::Char('s') => {
                         let name = app.selected_project_name();
                         if !name.is_empty() && app.session_for(&name).is_some() {
