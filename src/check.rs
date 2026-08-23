@@ -60,10 +60,11 @@ fn check_ssh(ssh_connection: &str) -> Result<String> {
 /// Host/port a direct connection would actually dial, including defaults and
 /// embedded URL targets.
 fn direct_target(proj: &ProjectConfig) -> (String, u16) {
-    if proj.connection_type == ConnectionType::Url && !proj.db_url.is_empty() {
-        if let Some((host, port)) = parse_db_url_host_port(&proj.db_url) {
-            return (host, port);
-        }
+    if proj.connection_type == ConnectionType::Url
+        && !proj.db_url.is_empty()
+        && let Some((host, port)) = parse_db_url_host_port(&proj.db_url)
+    {
+        return (host, port);
     }
     let host = if proj.db_host.trim().is_empty() {
         match proj.connection_type {

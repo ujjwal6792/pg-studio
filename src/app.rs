@@ -38,6 +38,8 @@ pub enum AppMode {
     EditingForm,
     ConfirmDialog,
     Help,
+    /// Live-filtering the projects list by name ('/').
+    Filtering,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -157,6 +159,10 @@ pub struct App {
     pub mode: AppMode,
     pub confirm_action: Option<ConfirmationAction>,
 
+    // Projects list scrolling / filtering
+    pub project_scroll: usize,
+    pub filter: Input,
+
     // Form inputs
     pub input_name: Input,
     pub input_ssh: Input,
@@ -215,6 +221,9 @@ impl App {
             details_tab: DetailsTab::Overview,
             mode: AppMode::Normal,
             confirm_action: None,
+
+            project_scroll: 0,
+            filter: Input::default(),
 
             input_name: Input::default(),
             input_ssh: Input::default(),
@@ -461,12 +470,78 @@ impl App {
                 self.selected_project_idx -= 1;
             }
             self.load_selected_into_form();
+            self.snap_selection_to_visible();
             self.status_message = format!("Deleted project '{}'", removed.name);
         }
         Ok(())
     }
 
     // --- Navigation ---
+
+    /// Project indices that survive the current name filter.
+    pub fn visible_projects(&self) -> Vec<usize> {
+        let query = self.filter.value().trim().to_lowercase();
+        self.config
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| query.is_empty() || p.name.to_lowercase().contains(&query))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Moves the selection within the filtered list, snapping to the nearest
+    /// visible project when the current one is filtered out.
+    pub fn move_selection(&mut self, delta: isize) {
+        let visible = self.visible_projects();
+        if visible.is_empty() {
+            return;
+        }
+        let new_pos = match visible.iter().position(|&i| i == self.selected_project_idx) {
+            Some(pos) => (pos as isize + delta).clamp(0, visible.len() as isize - 1) as usize,
+            None => {
+                if delta < 0 {
+                    visible.len() - 1
+                } else {
+                    0
+                }
+            }
+        };
+        self.selected_project_idx = visible[new_pos];
+        self.load_selected_into_form();
+    }
+
+    /// Re-selects a visible project if the filter hid the current one.
+    pub fn snap_selection_to_visible(&mut self) {
+        let visible = self.visible_projects();
+        if !visible.is_empty() && !visible.contains(&self.selected_project_idx) {
+            self.selected_project_idx = visible[0];
+            self.load_selected_into_form();
+        }
+    }
+
+    /// Keeps the selected row inside the visible scroll window.
+    pub fn clamp_project_scroll(&mut self, viewport_rows: usize) {
+        if viewport_rows == 0 {
+            return;
+        }
+        let pos = match self
+            .visible_projects()
+            .iter()
+            .position(|&i| i == self.selected_project_idx)
+        {
+            Some(p) => p,
+            None => {
+                self.project_scroll = 0;
+                return;
+            }
+        };
+        if pos < self.project_scroll {
+            self.project_scroll = pos;
+        } else if pos >= self.project_scroll + viewport_rows {
+            self.project_scroll = pos + 1 - viewport_rows;
+        }
+    }
 
     pub fn cycle_details_tab(&mut self, forward: bool) {
         self.details_tab = match (self.details_tab, forward) {
@@ -1129,6 +1204,8 @@ mod tests {
             details_tab: DetailsTab::Overview,
             mode: AppMode::Normal,
             confirm_action: None,
+            project_scroll: 0,
+            filter: Input::default(),
             input_name: Input::from("n"),
             input_ssh: Input::from("s"),
             input_url: Input::from("u"),

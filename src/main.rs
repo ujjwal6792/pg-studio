@@ -100,6 +100,10 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                     KeyCode::Char('?') => {
                         app.mode = AppMode::Help;
                     }
+                    KeyCode::Char('/') => {
+                        app.active_pane = ActivePane::ProjectsList;
+                        app.mode = AppMode::Filtering;
+                    }
                     KeyCode::Tab => app.cycle_details_tab(true),
                     KeyCode::BackTab => app.cycle_details_tab(false),
                     KeyCode::Left | KeyCode::Char('1') => {
@@ -144,21 +148,10 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        if app.active_pane == ActivePane::ProjectsList
-                            && app.selected_project_idx > 0
-                        {
-                            app.selected_project_idx -= 1;
-                            app.load_selected_into_form();
-                        }
+                        app.move_selection(-1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        if app.active_pane == ActivePane::ProjectsList
-                            && !app.config.projects.is_empty()
-                            && app.selected_project_idx < app.config.projects.len() - 1
-                        {
-                            app.selected_project_idx += 1;
-                            app.load_selected_into_form();
-                        }
+                        app.move_selection(1);
                     }
                     KeyCode::Enter => {
                         let auto_open = !key
@@ -228,6 +221,23 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                         if let Some(input) = app.input_mut(app.active_field) {
                             input.handle_event(&Event::Key(key));
                         }
+                    }
+                },
+
+                AppMode::Filtering => match key.code {
+                    KeyCode::Esc => {
+                        app.filter = tui_input::Input::default();
+                        app.mode = AppMode::Normal;
+                        app.snap_selection_to_visible();
+                    }
+                    KeyCode::Enter => {
+                        app.mode = AppMode::Normal;
+                        app.snap_selection_to_visible();
+                    }
+                    KeyCode::Up | KeyCode::BackTab => app.move_selection(-1),
+                    KeyCode::Down | KeyCode::Tab => app.move_selection(1),
+                    _ => {
+                        app.filter.handle_event(&Event::Key(key));
                     }
                 },
 

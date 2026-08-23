@@ -1,7 +1,7 @@
 use crate::app::{
     ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField, ProjectState,
 };
-use crate::config::ConnectionType;
+use crate::config::{ConnectionType, ProjectConfig};
 use crate::session::SessionStatus;
 use ratatui::{
     Frame,
@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -22,15 +22,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         ])
         .split(f.area());
 
+    let (list_area, details_area) = {
+        let content_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+            .split(main_chunks[1]);
+        (content_chunks[0], content_chunks[1])
+    };
+
     draw_header(f, app, main_chunks[0]);
-
-    let content_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(main_chunks[1]);
-
-    draw_projects_list(f, app, content_chunks[0]);
-    draw_details(f, app, content_chunks[1]);
+    draw_projects_list(f, app, list_area);
+    draw_details(f, app, details_area);
 
     draw_logs(f, app, main_chunks[2]);
     draw_footer(f, app, main_chunks[3]);
@@ -73,93 +75,142 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(header, area);
 }
 
-fn draw_projects_list(f: &mut Frame, app: &App, area: Rect) {
+fn draw_projects_list(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
-
-    let lines: Vec<Line> = if app.config.projects.is_empty() {
-        vec![Line::from(Span::styled(
-            "No projects yet. Press 'n' to add.",
-            Style::default().fg(app.theme.muted),
-        ))]
-    } else {
-        app.config
-            .projects
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let state = app.project_state(&p.name);
-                let selected = i == app.selected_project_idx;
-                let focused = app.active_pane == ActivePane::ProjectsList;
-
-                let (marker, marker_color) = match state {
-                    Some(ProjectState::Running) => ("●", app.theme.success),
-                    Some(ProjectState::Error) => ("●", app.theme.error),
-                    Some(ProjectState::Stopped) => ("○", app.theme.muted),
-                    None => ("•", app.theme.muted),
-                };
-
-                let name_color = if selected {
-                    app.theme.text
-                } else {
-                    match state {
-                        Some(ProjectState::Running) => app.theme.success,
-                        Some(ProjectState::Error) => app.theme.error,
-                        Some(ProjectState::Stopped) => app.theme.muted,
-                        None => app.theme.text,
-                    }
-                };
-
-                let bg = if selected {
-                    if focused {
-                        app.theme.highlight_bg
-                    } else {
-                        app.theme.muted
-                    }
-                } else {
-                    Color::Reset
-                };
-
-                let icon = match p.connection_type {
-                    ConnectionType::Ssh => "󰒋",
-                    ConnectionType::Url => "󰖟",
-                    ConnectionType::Local => "",
-                };
-
-                let bold = if selected {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                };
-
-                let marker_span = Span::styled(
-                    format!(" {} ", marker),
-                    Style::default().fg(marker_color).bg(bg),
-                );
-                let name_text = format!("{} {} ", icon, p.name);
-                let name_span = Span::styled(
-                    name_text,
-                    Style::default().fg(name_color).bg(bg).add_modifier(bold),
-                );
-                let pad = inner_width.saturating_sub(3 + 1 + 1 + p.name.chars().count());
-                let pad_span = Span::styled(" ".repeat(pad), Style::default().bg(bg));
-                Line::from(vec![marker_span, name_span, pad_span])
-            })
-            .collect()
-    };
-
-    let list_border_style = if app.active_pane == ActivePane::ProjectsList {
-        Style::default().fg(app.theme.accent)
-    } else {
-        Style::default().fg(app.theme.muted)
-    };
 
     let projects_block = Block::default()
         .title(" 󰍉 Projects ")
         .borders(Borders::ALL)
-        .border_style(list_border_style);
+        .border_style(if app.active_pane == ActivePane::ProjectsList {
+            Style::default().fg(app.theme.accent)
+        } else {
+            Style::default().fg(app.theme.muted)
+        });
     let inner = projects_block.inner(area);
     f.render_widget(projects_block, area);
-    f.render_widget(Paragraph::new(lines), inner);
+
+    // Filter row: shown while filtering or when a filter is applied.
+    let filter_text = app.filter.value().to_string();
+    let show_filter_row = app.mode == AppMode::Filtering || !filter_text.is_empty();
+    let rows_area = if show_filter_row {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        let cursor = if app.mode == AppMode::Filtering {
+            Some(Position {
+                x: chunks[0].x + 1 + filter_text.chars().count() as u16,
+                y: chunks[0].y,
+            })
+        } else {
+            None
+        };
+        let row = Line::from(vec![
+            Span::styled("/", Style::default().fg(app.theme.accent)),
+            Span::styled(
+                filter_text.clone(),
+                Style::default().fg(app.theme.text),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(row), chunks[0]);
+        if let Some(pos) = cursor {
+            f.set_cursor_position(pos);
+        }
+        chunks[1]
+    } else {
+        inner
+    };
+
+    if app.config.projects.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "No projects yet. Press 'n' to add.",
+                Style::default().fg(app.theme.muted),
+            )),
+            rows_area,
+        );
+        return;
+    }
+
+    let visible = app.visible_projects();
+    if visible.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "No projects match the filter.",
+                Style::default().fg(app.theme.muted),
+            )),
+            rows_area,
+        );
+        return;
+    }
+
+    let viewport_rows = rows_area.height.max(1) as usize;
+    app.clamp_project_scroll(viewport_rows);
+
+    let end = (app.project_scroll + viewport_rows).min(visible.len());
+    let lines: Vec<Line> = visible[app.project_scroll..end]
+        .iter()
+        .map(|&i| {
+            let p = &app.config.projects[i];
+            project_row(app, i == app.selected_project_idx, inner_width, p)
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), rows_area);
+}
+
+fn project_row(app: &App, selected: bool, inner_width: usize, p: &ProjectConfig) -> Line<'static> {
+    let state = app.project_state(&p.name);
+    let focused = app.active_pane == ActivePane::ProjectsList;
+
+    let (marker, marker_color) = match state {
+        Some(ProjectState::Running) => ("●", app.theme.success),
+        Some(ProjectState::Error) => ("●", app.theme.error),
+        Some(ProjectState::Stopped) => ("○", app.theme.muted),
+        None => ("•", app.theme.muted),
+    };
+
+    let name_color = if selected {
+        app.theme.text
+    } else {
+        match state {
+            Some(ProjectState::Running) => app.theme.success,
+            Some(ProjectState::Error) => app.theme.error,
+            Some(ProjectState::Stopped) => app.theme.muted,
+            None => app.theme.text,
+        }
+    };
+
+    let bg = if selected && focused {
+        app.theme.highlight_bg
+    } else if selected {
+        app.theme.muted
+    } else {
+        Color::Reset
+    };
+
+    let icon = match p.connection_type {
+        ConnectionType::Ssh => "󰒋",
+        ConnectionType::Url => "󰖟",
+        ConnectionType::Local => "",
+    };
+
+    let bold = if selected {
+        Modifier::BOLD
+    } else {
+        Modifier::empty()
+    };
+
+    let marker_span =
+        Span::styled(format!(" {} ", marker), Style::default().fg(marker_color).bg(bg));
+    let name_text = format!("{} {} ", icon, p.name);
+    let name_span = Span::styled(
+        name_text,
+        Style::default().fg(name_color).bg(bg).add_modifier(bold),
+    );
+    let pad = inner_width.saturating_sub(3 + 1 + 1 + p.name.chars().count());
+    let pad_span = Span::styled(" ".repeat(pad), Style::default().bg(bg));
+    Line::from(vec![marker_span, name_span, pad_span])
 }
 
 fn draw_details(f: &mut Frame, app: &App, area: Rect) {
@@ -683,7 +734,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.mode {
         AppMode::Normal => match app.active_pane {
             ActivePane::ProjectsList => {
-                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [n] New | [e] Edit | [d] Delete | [t] Test conn | [Enter] Focus details · again to launch | [s] Stop | [o/c] URL | [?] Help | [q] Quit"
+                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [n] New | [e] Edit | [d] Delete | [/] Filter | [t] Test conn | [Enter] Focus details · again to launch | [s] Stop | [o/c] URL | [?] Help | [q] Quit"
             }
             ActivePane::Details => {
                 " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [e] Edit | [t] Test conn | [Enter] Connect+Open Browser | [⇧Enter/r] Run | [s] Stop | [o/c] URL | [?] Help | [q] Quit"
@@ -691,6 +742,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         },
         AppMode::EditingForm => {
             " [Tab/Down] Next Field | [Shift+Tab/Up] Prev Field | [Enter] Save/Toggle | [Esc] Cancel Edit"
+        }
+        AppMode::Filtering => {
+            " Type to filter | [↑/↓] Navigate results | [Enter] Apply | [Esc] Clear filter"
         }
         AppMode::ConfirmDialog => " [Enter/y] Confirm | [Esc/n] Cancel",
         AppMode::Help => " [Esc/?/q] Close Help",
@@ -878,6 +932,7 @@ fn render_help_popup(f: &mut Frame, app: &App) {
                     "Focus details pane; press again to launch without opening browser",
                 ),
                 ("t", "Test connection reachability without launching"),
+                ("/", "Filter projects by name (Esc clears)"),
                 ("s", "Stop selected project's studio"),
             ],
         ),
