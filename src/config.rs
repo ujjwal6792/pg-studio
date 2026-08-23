@@ -169,6 +169,20 @@ impl AppConfig {
         }
     }
 
+    /// Copies the existing config file to `config.toml.bak` so a corrupt file
+    /// is never silently destroyed by a later save. Returns `Ok(None)` when
+    /// there is no config file to back up.
+    pub fn backup_corrupt_config() -> Result<Option<PathBuf>> {
+        let path = Self::config_file_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let backup = path.with_extension("toml.bak");
+        fs::copy(&path, &backup)
+            .with_context(|| format!("Failed to back up config file to {:?}", backup))?;
+        Ok(Some(backup))
+    }
+
     pub fn save(&mut self) -> Result<()> {
         // Sort projects by last opened descending before saving
         self.projects

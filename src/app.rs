@@ -178,7 +178,31 @@ pub struct App {
 
 impl App {
     pub fn new() -> Result<Self> {
-        let mut config = AppConfig::load().unwrap_or_default();
+        // A corrupt config must never be silently discarded: back it up and
+        // tell the user instead of starting empty and overwriting it on save.
+        let (config, config_warning) = match AppConfig::load() {
+            Ok(config) => (config, None),
+            Err(e) => {
+                let mut msg = format!(
+                    "Config file could not be loaded, starting with an empty project list:\n{:#}",
+                    e
+                );
+                match AppConfig::backup_corrupt_config() {
+                    Ok(Some(backup)) => msg.push_str(&format!(
+                        "\nThe original file was backed up to {}",
+                        backup.display()
+                    )),
+                    Ok(None) => {}
+                    Err(be) => msg.push_str(&format!(
+                        "\nWARNING: could not back up the original file: {:#}",
+                        be
+                    )),
+                }
+                (AppConfig::default(), Some(msg))
+            }
+        };
+
+        let mut config = config;
         config
             .projects
             .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
@@ -214,6 +238,10 @@ impl App {
 
         app.load_selected_into_form();
         app.restore_sessions();
+        if let Some(warning) = config_warning {
+            app.status_message = "Config error: starting with an empty project list (see Logs).".to_string();
+            app.add_log(warning);
+        }
         Ok(app)
     }
 
