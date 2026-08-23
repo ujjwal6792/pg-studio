@@ -1168,7 +1168,7 @@ fn render_help_popup(f: &mut Frame, app: &mut App) {
     let width = inner.width.max(8) as usize;
     let height = inner.height.max(1) as usize;
     const KEY_COL: usize = 18; // "▶ " + 16-char key column
-    let desc_width = width.saturating_sub(KEY_COL).max(10);
+    let desc_width = width.saturating_sub(KEY_COL + 2).max(10);
 
     // Pre-wrap every entry to the popup width so long descriptions never
     // overflow; remember which selectable row each line belongs to.
@@ -1177,6 +1177,7 @@ fn render_help_popup(f: &mut Frame, app: &mut App) {
         sel: Option<usize>,
     }
     let mut rows: Vec<Row> = Vec::new();
+    let mut selectable_count = 0usize;
     for entry in crate::app::help_entries() {
         if let Some(header) = entry.header {
             rows.push(Row {
@@ -1190,7 +1191,8 @@ fn render_help_popup(f: &mut Frame, app: &mut App) {
             });
             continue;
         }
-        let idx = rows.iter().filter(|r| r.sel.is_some()).count();
+        let idx = selectable_count;
+        selectable_count += 1;
         let selected = idx == app.help_selected;
         let (key_prefix, key_style) = if selected {
             (
