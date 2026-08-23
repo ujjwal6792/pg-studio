@@ -11,8 +11,11 @@ use pg_studio::{
     updater::{check_for_update, update_cli},
 };
 use ratatui::layout::Rect;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tui_input::backend::crossterm::EventHandler;
+
+/// Two Ctrl+C presses within this window quit the app.
+const DOUBLE_PRESS_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Parser)]
 #[command(
@@ -84,6 +87,7 @@ fn main() -> Result<()> {
 }
 
 fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
+    let mut last_ctrl_c: Option<Instant> = None;
     loop {
         app.poll_auto_open();
         let size = tui.terminal.size()?;
@@ -93,7 +97,25 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key(app, key)?;
+                    // Double Ctrl+C quits from any mode, bypassing dialogs.
+                    if key.code == KeyCode::Char('c')
+                        && key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                    {
+                        let now = Instant::now();
+                        if last_ctrl_c.is_some_and(|t| now.duration_since(t) < DOUBLE_PRESS_WINDOW)
+                        {
+                            break;
+                        }
+                        last_ctrl_c = Some(now);
+                        app.add_log("Press Ctrl+C again to quit.".to_string());
+                        continue;
+                    }
+                    last_ctrl_c = None;
+                    if handle_key(app, key)? {
+                        break;
+                    }
                 }
                 Event::Paste(data) => {
                     // Smart paste: a full postgres:// URL fills the whole form;
@@ -114,6 +136,7 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
             }
         }
     }
+    Ok(())
 }
 
 fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
@@ -186,7 +209,8 @@ fn select_tab_at_column(app: &mut App, column: u16, details_area: Rect) {
     }
 }
 
-fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<()> {
+/// Dispatches a key press. Returns `Ok(true)` when the app should exit.
+fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     match app.mode {
         AppMode::Normal => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -360,7 +384,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<()> {
         AppMode::ConfirmDialog => match key.code {
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => match app.confirm_action {
                 Some(ConfirmationAction::Quit) => {
-                    return Ok(());
+                    return Ok(true); // exit run_app; shutdown persists sessions
                 }
                 Some(ConfirmationAction::DeleteProject) => {
                     app.delete_selected_project()?;
@@ -398,5 +422,5 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<()> {
             _ => {}
         },
     }
-    Ok(())
+    Ok(false)
 }
