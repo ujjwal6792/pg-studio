@@ -4,7 +4,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use pg_studio::{
-    app::{ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField},
+    app::{ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField, HelpAction},
     backup,
     config::AppConfig,
     theme,
@@ -451,11 +451,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                 }
             }
             KeyCode::Char('u') => {
-                app.add_log("Checking GitHub Releases for updates...".to_string());
-                match update_cli() {
-                    Ok(msg) => app.add_log(msg),
-                    Err(e) => app.add_log(format!("Self-update error: {:#}", e)),
-                }
+                do_update(app);
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 app.move_selection(-1);
@@ -483,23 +479,8 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                     app.start_selected_project(false);
                 }
             }
-            KeyCode::Char('x') => match app.export_projects() {
-                Ok(path) => app.add_log(format!(
-                    "Exported {} projects to {} (passwords stay in your keychain).",
-                    app.config.projects.len(),
-                    path.display()
-                )),
-                Err(e) => app.add_log(format!("Export failed: {:#}", e)),
-            },
-            KeyCode::Char('i') => match app.import_projects() {
-                Ok((imported, skipped)) if imported + skipped == 0 => {
-                    app.add_log("Nothing to import: export file is empty or missing.".to_string())
-                }
-                Ok((imported, skipped)) => app.add_log(format!(
-                    "Imported {imported} project(s), skipped {skipped} existing."
-                )),
-                Err(e) => app.add_log(format!("Import failed: {:#}", e)),
-            },
+            KeyCode::Char('x') => do_export(app),
+            KeyCode::Char('i') => do_import(app),
             KeyCode::Char('t') => {
                 app.test_selected_connection();
             }
@@ -641,8 +622,124 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
             KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') => {
                 app.mode = AppMode::Normal
             }
+            KeyCode::Up | KeyCode::Char('k') => app.help_move(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.help_move(1),
+            KeyCode::PageUp => app.help_move(-5),
+            KeyCode::PageDown => app.help_move(5),
+            KeyCode::Enter => {
+                let action = app.selected_help_action();
+                app.mode = AppMode::Normal;
+                if let Some(action) = action
+                    && action != HelpAction::CloseHelp
+                {
+                    return execute_help_action(app, action);
+                }
+            }
             _ => {}
         },
     }
     Ok(false)
+}
+
+/// Runs the action bound to a keybindings-screen entry.
+fn execute_help_action(app: &mut App, action: HelpAction) -> Result<bool> {
+    use HelpAction::*;
+    match action {
+        Quit => {
+            app.confirm_action = Some(ConfirmationAction::Quit);
+            app.mode = AppMode::ConfirmDialog;
+        }
+        FocusProjects => app.active_pane = ActivePane::ProjectsList,
+        FocusDetails => app.active_pane = ActivePane::Details,
+        FlipPane => {
+            app.active_pane = if app.active_pane == ActivePane::ProjectsList {
+                ActivePane::Details
+            } else {
+                ActivePane::ProjectsList
+            };
+        }
+        TabsForward => app.cycle_details_tab(true),
+        TabsBack => app.cycle_details_tab(false),
+        MoveUp => app.move_selection(-1),
+        MoveDown => app.move_selection(1),
+        NewProject => {
+            app.reset_form();
+            app.active_pane = ActivePane::Details;
+            app.details_tab = DetailsTab::Config;
+            app.mode = AppMode::EditingForm;
+        }
+        EditProject => {
+            if !app.config.projects.is_empty() {
+                app.prepare_edit_mode();
+            }
+        }
+        DuplicateProject => app.duplicate_selected_project(),
+        DeleteProject => {
+            if app.active_pane == ActivePane::ProjectsList && !app.config.projects.is_empty() {
+                app.confirm_action = Some(ConfirmationAction::DeleteProject);
+                app.mode = AppMode::ConfirmDialog;
+            }
+        }
+        Filter => {
+            app.active_pane = ActivePane::ProjectsList;
+            app.mode = AppMode::Filtering;
+        }
+        TestConn => app.test_selected_connection(),
+        BackupMenu => app.open_backup_menu(),
+        StopProject => app.stop_selected_project(),
+        OpenUrl => app.open_selected_url(),
+        CopyUrl => app.copy_selected_url(),
+        Connect => {
+            if app.active_pane == ActivePane::ProjectsList {
+                app.focus_details_for_launch();
+            } else {
+                app.start_selected_project(true);
+            }
+        }
+        RunNoBrowser => {
+            if app.active_pane == ActivePane::ProjectsList {
+                app.focus_details_for_launch();
+            } else {
+                app.start_selected_project(false);
+            }
+        }
+        ExportProjects => do_export(app),
+        ImportProjects => do_import(app),
+        UpdateApp => do_update(app),
+        ScrollLogsUp => app.scroll_logs(-10),
+        ScrollLogsDown => app.scroll_logs(10),
+        CloseHelp => app.mode = AppMode::Normal,
+    }
+    Ok(false)
+}
+
+fn do_export(app: &mut App) {
+    match app.export_projects() {
+        Ok(path) => app.add_log(format!(
+            "Exported {} projects to {} (passwords stay in your keychain).",
+            app.config.projects.len(),
+            path.display()
+        )),
+        Err(e) => app.add_log(format!("Export failed: {:#}", e)),
+    }
+}
+
+fn do_import(app: &mut App) {
+    match app.import_projects() {
+        Ok((imported, skipped)) if imported + skipped == 0 => {
+            app.add_log("Nothing to import: export file is empty or missing.".to_string())
+        }
+        Ok((imported, skipped)) => app.add_log(format!(
+            "Imported {imported} project(s), skipped {skipped} existing."
+        )),
+        Err(e) => app.add_log(format!("Import failed: {:#}", e)),
+    }
+}
+
+fn do_update(app: &mut App) {
+    app.add_log("Checking GitHub Releases for updates...".to_string());
+    match update_cli() {
+        Ok(msg) => app.add_log(msg),
+        Err(e) => app.add_log(format!("Self-update error: {:#}", e)),
+    }
 }

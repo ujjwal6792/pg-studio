@@ -56,6 +56,172 @@ pub enum ConfirmationAction {
     MissingPgDump,
 }
 
+/// What pressing Enter on a highlighted keybinding entry does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpAction {
+    Quit,
+    FocusProjects,
+    FocusDetails,
+    FlipPane,
+    TabsForward,
+    TabsBack,
+    MoveUp,
+    MoveDown,
+    NewProject,
+    EditProject,
+    DuplicateProject,
+    DeleteProject,
+    Filter,
+    TestConn,
+    BackupMenu,
+    StopProject,
+    OpenUrl,
+    CopyUrl,
+    Connect,
+    RunNoBrowser,
+    ExportProjects,
+    ImportProjects,
+    UpdateApp,
+    ScrollLogsUp,
+    ScrollLogsDown,
+    CloseHelp,
+}
+
+/// One row of the keybindings screen; headers are group titles.
+pub struct HelpEntry {
+    pub header: Option<&'static str>,
+    pub key: &'static str,
+    pub desc: &'static str,
+    pub action: Option<HelpAction>,
+}
+
+pub fn help_entries() -> Vec<HelpEntry> {
+    use HelpAction::*;
+    let e = |key: &'static str, desc: &'static str, action: Option<HelpAction>| HelpEntry {
+        header: None,
+        key,
+        desc,
+        action,
+    };
+    let g = |header: &'static str| HelpEntry {
+        header: Some(header),
+        key: "",
+        desc: "",
+        action: None,
+    };
+    vec![
+        g("Navigation"),
+        e("←", "Focus Projects list", Some(FocusProjects)),
+        e("→", "Focus Details pane", Some(FocusDetails)),
+        e(
+            "[ or ]",
+            "Flip focus between Projects and Details",
+            Some(FlipPane),
+        ),
+        e("Tab", "Cycle Details sub-tabs forwards", Some(TabsForward)),
+        e(
+            "Shift+Tab",
+            "Cycle Details sub-tabs backwards",
+            Some(TabsBack),
+        ),
+        e("↑/k", "Move selection in the projects list", Some(MoveUp)),
+        e("↓/j", "Move selection in the projects list", Some(MoveDown)),
+        g("Projects"),
+        e("n", "New project", Some(NewProject)),
+        e("e", "Edit selected project", Some(EditProject)),
+        e(
+            "p",
+            "Duplicate selected project into the editor",
+            Some(DuplicateProject),
+        ),
+        e("d", "Delete selected project", Some(DeleteProject)),
+        e("/", "Filter projects by name (Esc clears)", Some(Filter)),
+        e(
+            "t",
+            "Test connection reachability without launching",
+            Some(TestConn),
+        ),
+        e(
+            "Enter",
+            "Focus details pane; press again to launch + open browser when ready",
+            Some(Connect),
+        ),
+        e(
+            "Shift+Enter / r",
+            "Focus details pane; press again to launch without opening browser",
+            Some(RunNoBrowser),
+        ),
+        e(
+            "b",
+            "Backup menu: app backup, restore, or DB dump",
+            Some(BackupMenu),
+        ),
+        e(
+            "s",
+            "Stop selected project's studio and dumps",
+            Some(StopProject),
+        ),
+        g("Editing"),
+        e(
+            "Enter / Space",
+            "In the editor: cycle Connection Type / save project",
+            None,
+        ),
+        e("Tab / ↓", "Next field (editor)", None),
+        e("Shift+Tab / ↑", "Previous field (editor)", None),
+        e(
+            "Paste",
+            "A full postgres:// URL auto-fills all fields",
+            None,
+        ),
+        e("Esc", "Cancel edit (asks to confirm)", None),
+        g("Studio"),
+        e(
+            "o",
+            "Open the running studio URL in your browser",
+            Some(OpenUrl),
+        ),
+        e(
+            "c",
+            "Copy the running studio URL to the clipboard",
+            Some(CopyUrl),
+        ),
+        e(
+            "URL",
+            "Studio URL is https://local.drizzle.studio?port=<port>",
+            None,
+        ),
+        g("Global"),
+        e(
+            "PgUp / PgDn",
+            "Scroll the Logs pane (click it to re-follow)",
+            Some(ScrollLogsUp),
+        ),
+        e(
+            "Mouse",
+            "Click panes/tabs/rows, wheel scrolls lists and logs",
+            None,
+        ),
+        e(
+            "x",
+            "Export all projects to a portable JSON file (no secrets)",
+            Some(ExportProjects),
+        ),
+        e(
+            "i",
+            "Import projects from that file (skips existing names)",
+            Some(ImportProjects),
+        ),
+        e("u", "Self-update pg-studio", Some(UpdateApp)),
+        e(
+            "q",
+            "Quit (running studios keep running in background)",
+            Some(Quit),
+        ),
+        e("?", "Toggle this keybindings screen", Some(CloseHelp)),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormField {
     Name,
@@ -177,6 +343,10 @@ pub struct App {
     /// Package manager chosen for a pending pg_dump install confirmation.
     pub pending_pkg_manager: Option<crate::installer::PackageManager>,
 
+    // Keybindings screen ('?')
+    pub help_selected: usize,
+    pub help_scroll: usize,
+
     /// Background pg_dump jobs shown in the Process tab.
     pub jobs: Vec<Arc<Mutex<Job>>>,
 
@@ -246,6 +416,9 @@ impl App {
             backup_menu_idx: 0,
             input_backup_path: Input::default(),
             pending_pkg_manager: None,
+
+            help_selected: 0,
+            help_scroll: 0,
 
             jobs: Vec::new(),
 
@@ -560,6 +733,33 @@ impl App {
         }
         Ok(result)
     }
+
+    // --- Keybindings screen ---
+
+    /// Number of selectable (non-header) entries.
+    pub fn help_selectable_count() -> usize {
+        help_entries().iter().filter(|e| e.header.is_none()).count()
+    }
+
+    pub fn help_move(&mut self, delta: isize) {
+        let count = Self::help_selectable_count();
+        if count == 0 {
+            return;
+        }
+        self.help_selected =
+            (self.help_selected as isize + delta).clamp(0, count as isize - 1) as usize;
+    }
+
+    /// The action bound to the currently highlighted entry, if any.
+    pub fn selected_help_action(&self) -> Option<HelpAction> {
+        help_entries()
+            .iter()
+            .filter(|e| e.header.is_none())
+            .nth(self.help_selected)
+            .and_then(|e| e.action)
+    }
+
+    // --- Keybindings screen end ---
 
     // --- Backup menu ('b') ---
     pub fn backup_menu_items() -> &'static [&'static str] {
@@ -1556,6 +1756,8 @@ mod tests {
             backup_menu_idx: 0,
             input_backup_path: Input::default(),
             pending_pkg_manager: None,
+            help_selected: 0,
+            help_scroll: 0,
             jobs: Vec::new(),
             input_name: Input::from("n"),
             input_ssh: Input::from("s"),

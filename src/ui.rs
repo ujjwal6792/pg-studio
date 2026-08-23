@@ -1153,124 +1153,120 @@ fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-fn render_help_popup(f: &mut Frame, app: &App) {
+fn render_help_popup(f: &mut Frame, app: &mut App) {
     let area = centered_rect(80, 92, f.area());
 
-    let groups: &[(&str, &[(&str, &str)])] = &[
-        (
-            "Navigation",
-            &[
-                ("← / →", "Focus Projects list / Details pane"),
-                ("[ or ]", "Flip focus between Projects and Details"),
-                ("1 / 2", "Jump to Projects / Details"),
-                (
-                    "Tab / Shift+Tab",
-                    "Cycle Details sub-tabs (Overview / Config / Process)",
-                ),
-                (
-                    "{ / }",
-                    "Cycle Details sub-tabs (Overview / Config / Process)",
-                ),
-                ("↑/k  ↓/j", "Move selection in the projects list"),
-            ],
-        ),
-        (
-            "Projects",
-            &[
-                ("n", "New project"),
-                ("e", "Edit selected project"),
-                ("p", "Duplicate selected project into the editor"),
-                ("d", "Delete selected project"),
-                (
-                    "Enter",
-                    "Focus details pane; press again to launch + open browser when ready",
-                ),
-                (
-                    "Shift+Enter / r",
-                    "Focus details pane; press again to launch without opening browser",
-                ),
-                ("t", "Test connection reachability without launching"),
-                ("b", "Backup menu: app backup, restore, or DB dump"),
-                ("/", "Filter projects by name (Esc clears)"),
-                ("s", "Stop selected project's studio"),
-            ],
-        ),
-        (
-            "Editing",
-            &[
-                (
-                    "Enter / Space",
-                    "Cycle Connection Type (SSH -> URL -> Local)",
-                ),
-                ("Tab / ↓", "Next field"),
-                ("Shift+Tab / ↑", "Previous field"),
-                ("Paste", "A full postgres:// URL auto-fills all fields"),
-                ("Enter", "Save project"),
-                ("Esc", "Cancel edit"),
-            ],
-        ),
-        (
-            "Studio",
-            &[
-                ("o", "Open the running studio URL in your browser"),
-                ("c", "Copy the running studio URL to the clipboard"),
-                (
-                    "URL",
-                    "Studio URL is https://local.drizzle.studio?port=<port>",
-                ),
-            ],
-        ),
-        (
-            "Global",
-            &[
-                ("?", "Toggle this help"),
-                (
-                    "PgUp / PgDn",
-                    "Scroll the Logs pane (click it to re-follow)",
-                ),
-                (
-                    "Mouse",
-                    "Click panes/tabs/rows, wheel scrolls lists and logs",
-                ),
-                (
-                    "x",
-                    "Export all projects to a portable JSON file (no secrets)",
-                ),
-                ("i", "Import projects from that file (skips existing names)"),
-                ("u", "Self-update pg-studio"),
-                ("q / Esc", "Quit (stops all running studios)"),
-            ],
-        ),
-    ];
-
-    let mut lines: Vec<Line> = vec![];
-    for (group, entries) in groups {
-        lines.push(Line::from(Span::styled(
-            format!(" {} ", group),
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for (key, desc) in *entries {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {:<16}", key),
-                    Style::default().fg(app.theme.warn),
-                ),
-                Span::styled(*desc, Style::default().fg(app.theme.text)),
-            ]));
-        }
-        lines.push(Line::from(""));
-    }
-
     let block = Block::default()
-        .title(" Keybindings ")
+        .title(" Keybindings - ↑/↓ select · ⏎ run · Esc close ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.accent));
-
+    let inner = block.inner(area);
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    f.render_widget(block, area);
+
+    let width = inner.width.max(8) as usize;
+    let height = inner.height.max(1) as usize;
+    const KEY_COL: usize = 18; // "▶ " + 16-char key column
+    let desc_width = width.saturating_sub(KEY_COL).max(10);
+
+    // Pre-wrap every entry to the popup width so long descriptions never
+    // overflow; remember which selectable row each line belongs to.
+    struct Row {
+        spans: Vec<Span<'static>>,
+        sel: Option<usize>,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    for entry in crate::app::help_entries() {
+        if let Some(header) = entry.header {
+            rows.push(Row {
+                spans: vec![Span::styled(
+                    format!(" {header} "),
+                    Style::default()
+                        .fg(app.theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )],
+                sel: None,
+            });
+            continue;
+        }
+        let idx = rows.iter().filter(|r| r.sel.is_some()).count();
+        let selected = idx == app.help_selected;
+        let (key_prefix, key_style) = if selected {
+            (
+                format!(">{:<width$}", entry.key, width = KEY_COL - 1),
+                Style::default()
+                    .fg(app.theme.warn)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(app.theme.highlight_bg),
+            )
+        } else {
+            (
+                format!(" {:<width$}", entry.key, width = KEY_COL - 1),
+                Style::default().fg(app.theme.warn),
+            )
+        };
+        let base_desc_style = if selected {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.highlight_bg)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        let mut wrapped = wrap_text(entry.desc, desc_width);
+        if wrapped.is_empty() {
+            wrapped.push(String::new());
+        }
+        for (li, part) in wrapped.iter().enumerate() {
+            let key_span_text = if li == 0 {
+                key_prefix.clone()
+            } else {
+                " ".repeat(KEY_COL)
+            };
+            rows.push(Row {
+                spans: vec![
+                    Span::styled(key_span_text, key_style),
+                    Span::styled(part.clone(), base_desc_style),
+                ],
+                sel: Some(idx),
+            });
+        }
+        rows.push(Row {
+            spans: vec![Span::styled(
+                " ".repeat(KEY_COL.min(width)),
+                if selected {
+                    base_desc_style
+                } else {
+                    Style::default()
+                },
+            )],
+            sel: Some(idx),
+        });
+    }
+
+    // Keep the highlighted entry inside the scroll window.
+    if let Some(first) = rows.iter().position(|r| r.sel == Some(app.help_selected)) {
+        let last = rows
+            .iter()
+            .rposition(|r| r.sel == Some(app.help_selected))
+            .unwrap_or(first);
+        if first < app.help_scroll {
+            app.help_scroll = first;
+        } else if last >= app.help_scroll + height {
+            app.help_scroll = last + 1 - height;
+        }
+    } else {
+        app.help_scroll = 0;
+    }
+    app.help_scroll = app.help_scroll.min(rows.len().saturating_sub(height));
+
+    let start = app.help_scroll;
+    let end = (start + height).min(rows.len());
+    let visible: Vec<Line> = rows[start..end]
+        .iter()
+        .map(|r| Line::from(r.spans.clone()))
+        .collect();
+    f.render_widget(Paragraph::new(visible), inner);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
