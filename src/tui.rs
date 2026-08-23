@@ -2,8 +2,8 @@ use anyhow::Result;
 use crossterm::{
     ExecutableCommand,
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -32,6 +32,7 @@ impl Tui {
         // Bracketed paste lets us detect multi-char pastes (used for smart
         // URL filling). Unsupported terminals simply ignore it.
         stdout().execute(EnableBracketedPaste)?;
+        stdout().execute(EnableMouseCapture)?;
         self.terminal.clear()?;
         Ok(())
     }
@@ -39,6 +40,7 @@ impl Tui {
     pub fn exit(&mut self) -> Result<()> {
         stdout().execute(PopKeyboardEnhancementFlags)?;
         stdout().execute(DisableBracketedPaste)?;
+        stdout().execute(DisableMouseCapture)?;
         stdout().execute(LeaveAlternateScreen)?;
         disable_raw_mode()?;
         self.terminal.show_cursor()?;

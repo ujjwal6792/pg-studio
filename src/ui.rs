@@ -11,7 +11,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 
-pub fn draw(f: &mut Frame, app: &mut App) {
+/// The app's fixed layout, shared between drawing and mouse hit-testing.
+/// Returns `(header, projects_list, details, logs, footer)`.
+pub fn content_areas(full: Rect) -> (Rect, Rect, Rect, Rect, Rect) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -20,22 +22,29 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Constraint::Length(8), // Logs / Guidance Output
             Constraint::Length(1), // Footer / Help Bar
         ])
-        .split(f.area());
+        .split(full);
+    let content = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(main_chunks[1]);
+    (
+        main_chunks[0],
+        content[0],
+        content[1],
+        main_chunks[2],
+        main_chunks[3],
+    )
+}
 
-    let (list_area, details_area) = {
-        let content_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-            .split(main_chunks[1]);
-        (content_chunks[0], content_chunks[1])
-    };
+pub fn draw(f: &mut Frame, app: &mut App) {
+    let (header_area, list_area, details_area, logs_area, footer_area) = content_areas(f.area());
 
-    draw_header(f, app, main_chunks[0]);
+    draw_header(f, app, header_area);
     draw_projects_list(f, app, list_area);
     draw_details(f, app, details_area);
 
-    draw_logs(f, app, main_chunks[2]);
-    draw_footer(f, app, main_chunks[3]);
+    draw_logs(f, app, logs_area);
+    draw_footer(f, app, footer_area);
 
     if app.mode == AppMode::ConfirmDialog
         && let Some(action) = app.confirm_action
@@ -705,13 +714,19 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
                     app.status_message.clone()
                 } else {
                     let h = area.height.saturating_sub(2).max(1) as usize;
-                    let start = logs.len().saturating_sub(h);
-                    logs[start..].join("\n")
+                    let end = logs.len().saturating_sub(app.log_scroll.min(logs.len()));
+                    let start = end.saturating_sub(h);
+                    logs[start..end].join("\n")
                 }
             } else {
                 app.status_message.clone()
             };
-            (" Logs & Output ".to_string(), logs_text)
+            let title = if app.log_scroll > 0 {
+                format!(" Logs & Output  (+{} lines up) ", app.log_scroll)
+            } else {
+                " Logs & Output ".to_string()
+            };
+            (title, logs_text)
         }
     };
 
@@ -730,7 +745,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.mode {
         AppMode::Normal => match app.active_pane {
             ActivePane::ProjectsList => {
-                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [n] New | [e] Edit | [p] Dup | [d] Delete | [/] Filter | [t] Test conn | [Enter] Focus details · again to launch | [s] Stop | [o/c] URL | [?] Help | [q] Quit"
+                " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [n] New | [e] Edit | [p] Dup | [d] Delete | [/] Filter | [t] Test conn | [Enter] Focus details · again to launch | [s] Stop | [o/c] URL | [PgUp/Dn] Logs | [?] Help | [q] Quit"
             }
             ActivePane::Details => {
                 " [←/1] Projects · [→/2] Details · [[/]] Flip · [Tab/⇧Tab] Sub-tab | [e] Edit | [t] Test conn | [Enter] Connect+Open Browser | [⇧Enter/r] Run | [s] Stop | [o/c] URL | [?] Help | [q] Quit"
@@ -961,6 +976,8 @@ fn render_help_popup(f: &mut Frame, app: &App) {
             "Global",
             &[
                 ("?", "Toggle this help"),
+                ("PgUp / PgDn", "Scroll the Logs pane (click it to re-follow)"),
+                ("Mouse", "Click panes/tabs/rows, wheel scrolls lists and logs"),
                 ("u", "Self-update pg-studio"),
                 ("q / Esc", "Quit (stops all running studios)"),
             ],

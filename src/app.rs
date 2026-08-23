@@ -162,6 +162,8 @@ pub struct App {
     // Projects list scrolling / filtering
     pub project_scroll: usize,
     pub filter: Input,
+    /// Lines kept off the bottom of the Logs pane (0 = follow latest).
+    pub log_scroll: usize,
 
     // Form inputs
     pub input_name: Input,
@@ -224,6 +226,7 @@ impl App {
 
             project_scroll: 0,
             filter: Input::default(),
+            log_scroll: 0,
 
             input_name: Input::default(),
             input_ssh: Input::default(),
@@ -581,6 +584,13 @@ impl App {
         } else if pos >= self.project_scroll + viewport_rows {
             self.project_scroll = pos + 1 - viewport_rows;
         }
+    }
+
+    /// Scrolls the Logs pane. Positive values page towards history, zero
+    /// offset means "follow latest".
+    pub fn scroll_logs(&mut self, lines: isize) {
+        let max = self.logs.lock().map(|l| l.len()).unwrap_or(0) as isize;
+        self.log_scroll = (self.log_scroll as isize + lines).clamp(0, max) as usize;
     }
 
     pub fn cycle_details_tab(&mut self, forward: bool) {
@@ -1285,6 +1295,7 @@ mod tests {
             confirm_action: None,
             project_scroll: 0,
             filter: Input::default(),
+            log_scroll: 0,
             input_name: Input::from("n"),
             input_ssh: Input::from("s"),
             input_url: Input::from("u"),

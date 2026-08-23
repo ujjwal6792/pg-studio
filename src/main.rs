@@ -1,13 +1,14 @@
 use anyhow::Result;
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use pg_studio::{
     app::{ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField},
     theme,
     tui::Tui,
-    ui::draw,
+    ui::{content_areas, draw},
     updater::{check_for_update, update_cli},
 };
+use ratatui::layout::Rect;
 use std::time::Duration;
 use tui_input::backend::crossterm::EventHandler;
 
@@ -83,6 +84,8 @@ fn main() -> Result<()> {
 fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
     loop {
         app.poll_auto_open();
+        let size = tui.terminal.size()?;
+        let frame_area = Rect::new(0, 0, size.width, size.height);
         tui.terminal.draw(|f| draw(f, app))?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -99,14 +102,85 @@ fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
                         for ch in data.chars() {
                             input.handle_event(&Event::Key(crossterm::event::KeyEvent::new(
                                 KeyCode::Char(ch),
-                                crossterm::event::KeyModifiers::NONE,
+                                KeyModifiers::NONE,
                             )));
                         }
                     }
                 }
+                Event::Mouse(mouse) => handle_mouse(app, mouse, frame_area),
                 _ => {}
             }
         }
+    }
+}
+
+fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent, term: Rect) {
+    if app.mode != AppMode::Normal && app.mode != AppMode::Filtering {
+        return;
+    }
+    let (_, list, details, logs, _) = content_areas(term);
+
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let up = mouse.kind == MouseEventKind::ScrollUp;
+            if rect_contains(logs, mouse.column, mouse.row) {
+                app.scroll_logs(if up { -10 } else { 10 });
+            } else if rect_contains(list, mouse.column, mouse.row) {
+                app.move_selection(if up { -1 } else { 1 });
+            }
+        }
+        MouseEventKind::Down(_) => {
+            if rect_contains(list, mouse.column, mouse.row) {
+                app.active_pane = ActivePane::ProjectsList;
+                select_project_at_row(app, mouse.row, list);
+            } else if rect_contains(details, mouse.column, mouse.row) {
+                app.active_pane = ActivePane::Details;
+                select_tab_at_column(app, mouse.column, details);
+            } else if rect_contains(logs, mouse.column, mouse.row) {
+                app.scroll_logs(0); // clicking the logs pane snaps back to latest
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Maps a click inside the projects pane to a visible row.
+fn select_project_at_row(app: &mut App, row: u16, list_area: Rect) {
+    let inner_y = list_area.y + 1; // top border
+    let show_filter_row = app.mode == AppMode::Filtering || !app.filter.value().is_empty();
+    let data_start = inner_y + u16::from(show_filter_row);
+    if row < data_start {
+        return; // clicked the filter row or border
+    }
+    let pos = (row - data_start) as usize + app.project_scroll;
+    let visible = app.visible_projects();
+    if let Some(&idx) = visible.get(pos)
+        && idx != app.selected_project_idx
+    {
+        app.selected_project_idx = idx;
+        app.load_selected_into_form();
+    }
+}
+
+/// Maps a click inside the Details pane to one of the three sub-tab boxes.
+/// Must mirror the tab widths used by `draw_details_subtabs`.
+fn select_tab_at_column(app: &mut App, column: u16, details_area: Rect) {
+    const TAB_WIDTHS: [(DetailsTab, u16); 3] = [
+        (DetailsTab::Overview, 15),
+        (DetailsTab::Config, 13),
+        (DetailsTab::Process, 14),
+    ];
+    let mut x = details_area.x + 1; // left border
+    for (tab, w) in TAB_WIDTHS {
+        if column >= x && column < x + w {
+            app.details_tab = tab;
+            return;
+        }
+        x += w;
     }
 }
 
@@ -194,9 +268,11 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<()> {
                     app.start_selected_project(false);
                 }
             }
-            KeyCode::Char('t') => {
-                app.test_selected_connection();
-            }
+                    KeyCode::Char('t') => {
+                        app.test_selected_connection();
+                    }
+                    KeyCode::PageUp => app.scroll_logs(-10),
+                    KeyCode::PageDown => app.scroll_logs(10),
             KeyCode::Char('s') => {
                 let name = app.selected_project_name();
                 if !name.is_empty() && app.session_for(&name).is_some() {
