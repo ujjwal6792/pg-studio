@@ -678,11 +678,11 @@ impl App {
                         && j.status == JobStatus::Running
                     {
                         j.status = JobStatus::Done;
-                        j.detail = format!("{} · {}", out.display(), human_size(size));
+                        j.detail = format!("{} · {}", out.display(), dbbackup::human_size(size));
                     }
                     add_global_log(
                         &global_logs,
-                        format!("Dump complete: {} ({})", name, human_size(size)),
+                        format!("Dump complete: {} ({})", name, dbbackup::human_size(size)),
                     );
                 }
                 Err(e) => {
@@ -1204,21 +1204,6 @@ fn push_session_log(session: &Arc<Mutex<RunningSession>>, msg: String) {
 fn add_global_log(global: &Arc<Mutex<Vec<String>>>, msg: String) {
     if let Ok(mut g) = global.lock() {
         g.push(msg);
-    }
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[0])
-    } else {
-        format!("{size:.1} {}", UNITS[unit])
     }
 }
 

@@ -55,6 +55,17 @@ enum Commands {
         /// Backup file to read
         file: PathBuf,
     },
+    /// Dump a project's database with pg_dump (needs the PostgreSQL client tools).
+    Dump {
+        /// Project name
+        project: String,
+        /// Destination file (default: ~/Downloads/<project>-<timestamp>.dump)
+        #[arg(short = 'o', long = "out")]
+        out: Option<PathBuf>,
+        /// Format override: "custom" or "sql" (default: from extension, else custom)
+        #[arg(long)]
+        format: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -141,6 +152,83 @@ fn run_command(command: Commands) -> Result<()> {
                 "Restored from {}: {imported} imported, {skipped} skipped ({total} in file).",
                 file.display()
             );
+        }
+        Commands::Dump {
+            project,
+            out,
+            format,
+        } => {
+            run_dump_command(project, out, format)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_dump_command(project: String, out: Option<PathBuf>, format: Option<String>) -> Result<()> {
+    let config = AppConfig::load()?;
+    let proj = config
+        .projects
+        .iter()
+        .find(|p| p.name == project)
+        .or_else(|| {
+            config
+                .projects
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(&project))
+        })
+        .cloned();
+    let Some(proj) = proj else {
+        eprintln!(
+            "No project named '{project}'. Projects: {}",
+            if config.projects.is_empty() {
+                "(none)".into()
+            } else {
+                config
+                    .projects
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+        std::process::exit(1);
+    };
+
+    let format = match format.as_deref() {
+        Some("custom") | None => match &out {
+            Some(p) => pg_studio::dbbackup::DumpFormat::from_path(p),
+            None => pg_studio::dbbackup::DumpFormat::Custom,
+        },
+        Some("sql") => pg_studio::dbbackup::DumpFormat::Plain,
+        Some(other) => {
+            eprintln!("Unknown format '{other}' (expected \"custom\" or \"sql\").");
+            std::process::exit(1);
+        }
+    };
+    let path = match out {
+        Some(p) => p,
+        None => pg_studio::dbbackup::default_dump_path(&proj.name, format)?,
+    };
+
+    println!("Dumping '{}' to {} ...", proj.name, path.display());
+    let pid_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let started = Instant::now();
+    match pg_studio::dbbackup::run_dump(
+        &proj,
+        path.clone(),
+        format,
+        pid_sink,
+        std::sync::Arc::new(move |line: String| eprintln!("{line}")),
+    ) {
+        Ok((size, _guard)) => println!(
+            "Done in {:.1}s: {} ({})",
+            started.elapsed().as_secs_f32(),
+            path.display(),
+            pg_studio::dbbackup::human_size(size)
+        ),
+        Err(e) => {
+            eprintln!("Dump failed: {:#}", e);
+            std::process::exit(1);
         }
     }
     Ok(())

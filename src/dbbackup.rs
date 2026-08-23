@@ -35,6 +35,22 @@ impl DumpFormat {
     }
 }
 
+/// Human-readable byte size, e.g. "4.2 MiB".
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 pub fn check_pg_dump() -> Result<()> {
     which::which("pg_dump").context(
         "Postgres 'pg_dump' is not installed or not in PATH. Install the PostgreSQL client tools.",
