@@ -40,6 +40,8 @@ pub enum AppMode {
     Help,
     /// Live-filtering the projects list by name ('/').
     Filtering,
+    /// Backup / restore / dump menu ('b').
+    BackupMenu,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -165,6 +167,10 @@ pub struct App {
     /// Lines kept off the bottom of the Logs pane (0 = follow latest).
     pub log_scroll: usize,
 
+    // Backup menu ('b')
+    pub backup_menu_idx: usize,
+    pub input_backup_path: Input,
+
     // Form inputs
     pub input_name: Input,
     pub input_ssh: Input,
@@ -227,6 +233,9 @@ impl App {
             project_scroll: 0,
             filter: Input::default(),
             log_scroll: 0,
+
+            backup_menu_idx: 0,
+            input_backup_path: Input::default(),
 
             input_name: Input::default(),
             input_ssh: Input::default(),
@@ -511,12 +520,9 @@ impl App {
         Ok(path)
     }
 
-    /// Merges projects from the export bundle, skipping names that already
-    /// exist. Returns `(imported, skipped)` and persists on success.
-    pub fn import_projects(&mut self) -> Result<(usize, usize)> {
-        let path = AppConfig::export_file_path()?;
-        let content = std::fs::read_to_string(&path)?;
-        let bundle: ProjectBundle = serde_json::from_str(&content)?;
+    /// Merges projects from any backup bundle into the live config,
+    /// skipping names that already exist.
+    pub fn merge_bundle(&mut self, bundle: ProjectBundle) -> (usize, usize) {
         let mut imported = 0;
         let mut skipped = 0;
         for project in bundle.projects {
@@ -527,14 +533,98 @@ impl App {
             self.config.projects.push(project);
             imported += 1;
         }
-        if imported > 0 {
-            self.config.save()?;
-            self.config
-                .projects
-                .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
-            self.load_selected_into_form();
+        if imported > 0
+            && let Err(e) = self.config.save()
+        {
+            self.add_log(format!("Failed to save imported projects: {:#}", e));
+            return (0, skipped);
         }
-        Ok((imported, skipped))
+        self.config
+            .projects
+            .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+        self.load_selected_into_form();
+        (imported, skipped)
+    }
+
+    /// Merges projects from the export bundle, skipping names that already
+    /// exist. Returns `(imported, skipped)` and persists on success.
+    pub fn import_projects(&mut self) -> Result<(usize, usize)> {
+        let path = AppConfig::export_file_path()?;
+        let bundle = crate::backup::read_backup(&path)?;
+        let result = self.merge_bundle(bundle);
+        if result.0 == 0 && result.1 == 0 {
+            anyhow::bail!("No projects found in {:?}", path);
+        }
+        Ok(result)
+    }
+
+    // --- Backup menu ('b') ---
+
+    pub fn backup_menu_items() -> &'static [&'static str] {
+        &["Download app backup", "Restore app backup from file"]
+    }
+
+    pub fn open_backup_menu(&mut self) {
+        self.backup_menu_idx = 0;
+        self.input_backup_path = Input::from(
+            crate::backup::default_backup_path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
+        self.mode = AppMode::BackupMenu;
+    }
+
+    /// Re-prefills the path input whenever the highlighted action changes.
+    pub fn backup_menu_move(&mut self, delta: isize) {
+        let len = Self::backup_menu_items().len();
+        let current = self.backup_menu_idx as isize;
+        self.backup_menu_idx = ((current + delta).rem_euclid(len as isize)) as usize;
+        let default_path = if self.backup_menu_idx == 0 {
+            crate::backup::default_backup_path()
+        } else {
+            AppConfig::export_file_path()
+        };
+        self.input_backup_path = Input::from(
+            default_path
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
+    }
+
+    pub fn execute_backup_action(&mut self) {
+        let raw = self.input_backup_path.value().trim().to_string();
+        if raw.is_empty() {
+            self.add_log("Backup aborted: no path given.".to_string());
+            return;
+        }
+        let path = PathBuf::from(raw);
+        match self.backup_menu_idx {
+            0 => match crate::backup::write_backup(&path, self.config.projects.clone()) {
+                Ok(_) => {
+                    self.add_log(format!(
+                        "Backup written: {} ({} project(s), passwords not included)",
+                        path.display(),
+                        self.config.projects.len()
+                    ));
+                    self.mode = AppMode::Normal;
+                }
+                Err(e) => self.add_log(format!("Backup failed: {:#}", e)),
+            },
+            1 => match crate::backup::read_backup(&path) {
+                Ok(bundle) => {
+                    let total = bundle.projects.len();
+                    let (imported, skipped) = self.merge_bundle(bundle);
+                    self.add_log(format!(
+                        "Restore from {}: {} imported, {skipped} skipped ({total} in file).",
+                        path.display(),
+                        imported
+                    ));
+                    self.mode = AppMode::Normal;
+                }
+                Err(e) => self.add_log(format!("Restore failed: {:#}", e)),
+            },
+            _ => {}
+        }
     }
 
     pub fn delete_selected_project(&mut self) -> Result<()> {
@@ -1335,6 +1425,8 @@ mod tests {
             project_scroll: 0,
             filter: Input::default(),
             log_scroll: 0,
+            backup_menu_idx: 0,
+            input_backup_path: Input::default(),
             input_name: Input::from("n"),
             input_ssh: Input::from("s"),
             input_url: Input::from("u"),

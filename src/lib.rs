@@ -1,4 +1,5 @@
 pub mod app;
+pub mod backup;
 pub mod check;
 pub mod config;
 pub mod drizzle;

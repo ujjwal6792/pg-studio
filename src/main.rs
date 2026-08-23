@@ -224,6 +224,9 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                 app.active_pane = ActivePane::ProjectsList;
                 app.mode = AppMode::Filtering;
             }
+            KeyCode::Char('b') | KeyCode::Char('B') => {
+                app.open_backup_menu();
+            }
             KeyCode::Tab => app.cycle_details_tab(true),
             KeyCode::BackTab => app.cycle_details_tab(false),
             KeyCode::Left | KeyCode::Char('1') => {
@@ -378,6 +381,16 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
             KeyCode::Down | KeyCode::Tab => app.move_selection(1),
             _ => {
                 app.filter.handle_event(&Event::Key(key));
+            }
+        },
+
+        AppMode::BackupMenu => match key.code {
+            KeyCode::Esc => app.mode = AppMode::Normal,
+            KeyCode::Up | KeyCode::BackTab => app.backup_menu_move(-1),
+            KeyCode::Down | KeyCode::Tab => app.backup_menu_move(1),
+            KeyCode::Enter => app.execute_backup_action(),
+            _ => {
+                app.input_backup_path.handle_event(&Event::Key(key));
             }
         },
 

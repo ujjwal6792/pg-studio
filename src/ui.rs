@@ -55,6 +55,70 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.mode == AppMode::Help {
         render_help_popup(f, app);
     }
+    if app.mode == AppMode::BackupMenu {
+        render_backup_menu(f, app);
+    }
+}
+
+/// Centered backup menu: action list plus an editable destination path.
+fn render_backup_menu(f: &mut Frame, app: &App) {
+    let items = App::backup_menu_items();
+    const H_PAD: u16 = 3;
+    let width = 66u16.min(f.area().width.saturating_sub(4));
+    let inner_width = (width.saturating_sub(2 + H_PAD * 2)) as usize;
+    let height = (items.len() as u16 + 5).min(f.area().height.saturating_sub(2)); // opts + blank + path + hint + borders
+
+    let area = centered_rect_fixed(width, height, f.area());
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, label) in items.iter().enumerate() {
+        let selected = i == app.backup_menu_idx;
+        let marker = if selected { "▶ " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.dim)
+        };
+        lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
+    }
+    lines.push(Line::from(""));
+    let path_val = app.input_backup_path.value();
+    let shown: String = path_val
+        .chars()
+        .rev()
+        .take(inner_width.saturating_sub(" Path: ".len()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    lines.push(Line::from(vec![
+        Span::styled(" Path: ", Style::default().fg(app.theme.warn)),
+        Span::styled(shown, Style::default().fg(app.theme.text)),
+    ]));
+    lines.push(Line::from(Span::styled(
+        " ↑/↓ Action · Type edits path · ⏎ Run · ⎋ Close",
+        Style::default().fg(app.theme.muted),
+    )));
+
+    let block = Block::default()
+        .title(" Backup ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.accent))
+        .padding(Padding::new(H_PAD, H_PAD, 1, 0));
+
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
+
+    // Caret at the end of the path input.
+    let path_row_y = area.y + 1 + items.len() as u16 + 1; // border+pad, options, blank
+    let col = area.x + H_PAD + " Path: ".len() as u16;
+    f.set_cursor_position(Position {
+        x: col,
+        y: path_row_y,
+    });
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -811,6 +875,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             ("⏎", "Apply"),
             ("Esc", "Clear"),
         ],
+        AppMode::BackupMenu => vec![("↑/↓", "Action"), ("⏎", "Run"), ("Esc", "Close")],
         AppMode::ConfirmDialog => vec![("⏎/y", "Confirm"), ("Esc/n", "Cancel")],
         AppMode::Help => vec![("Esc/?/q", "Close")],
     };
