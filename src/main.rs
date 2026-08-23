@@ -6,13 +6,15 @@ use crossterm::event::{
 use pg_studio::{
     app::{ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField, HelpAction},
     backup,
-    config::AppConfig,
+    config::{AppConfig, ConnectionType, ProjectConfig},
+    open::{copy_to_clipboard, open_url},
     theme,
     tui::Tui,
     ui::{content_areas, draw},
     updater::{check_for_update, update_cli},
 };
 use ratatui::layout::Rect;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tui_input::backend::crossterm::EventHandler;
@@ -20,10 +22,32 @@ use tui_input::backend::crossterm::EventHandler;
 /// Two Ctrl+C presses within this window quit the app.
 const DOUBLE_PRESS_WINDOW: Duration = Duration::from_secs(2);
 
+const EXAMPLES: &str = "\
+Projects:
+  pg-studio                          launch the interactive TUI
+  pg-studio list                     show configured projects and their status
+  pg-studio new --type ssh --ssh ubuntu@host -d app -u admin --password-stdin
+  pg-studio new --type local -d postgres -u postgres
+  pg-studio remove my-project        delete (asks to confirm; -y skips)
+  pg-studio test my-project          check reachability without launching
+
+Studio:
+  pg-studio start my-project         launch detached, print URL when ready
+  pg-studio start my-project --open  ...and open the browser
+  pg-studio url my-project           print the running studio URL
+  pg-studio stop my-project          stop a studio (\"all\" stops everything)
+
+Backups:
+  pg-studio backup [FILE]            password-free backup of all projects
+  pg-studio restore FILE             import projects from a backup
+  pg-studio dump my-project          database dump via pg_dump
+";
+
 #[derive(Parser)]
 #[command(
     name = "pg-studio",
-    about = "A CLI tool to introspect a remote Postgres database via SSH tunnel and launch Drizzle Studio",
+    about = "Manage Postgres projects and launch Drizzle Studio - interactive TUI by default, full CLI for everything else.",
+    after_help = EXAMPLES,
     disable_version_flag = true
 )]
 struct Cli {
@@ -69,6 +93,77 @@ enum Commands {
         /// package manager instead of failing.
         #[arg(long)]
         install: bool,
+    },
+    /// List configured projects.
+    List,
+    /// Create a project non-interactively.
+    New {
+        /// Project name (default: derived from database and host)
+        name: Option<String>,
+        /// Connection type: ssh, url, or local
+        #[arg(long)]
+        r#type: Option<String>,
+        /// SSH connection string (for --type ssh)
+        #[arg(long)]
+        ssh: Option<String>,
+        /// Full postgres:// URL (for --type url)
+        #[arg(long)]
+        url: Option<String>,
+        /// Database host (url/local types; default localhost for local)
+        #[arg(long)]
+        host: Option<String>,
+        /// Database port (default 5432)
+        #[arg(long)]
+        port: Option<String>,
+        /// Database name
+        #[arg(short = 'd', long)]
+        db: Option<String>,
+        /// Database user
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+        /// Read the password from stdin (one line)
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Delete a project from the config.
+    Remove {
+        /// Project name
+        name: String,
+        /// Skip the confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Test whether a project is reachable.
+    Test {
+        /// Project name
+        name: String,
+    },
+    /// Print the running studio URL for a project.
+    Url {
+        /// Project name
+        name: String,
+        /// Open it in the browser instead of printing
+        #[arg(long)]
+        open: bool,
+        /// Copy it to the clipboard instead of printing
+        #[arg(long)]
+        copy: bool,
+    },
+    /// Launch a project's studio detached; prints the URL when ready.
+    Start {
+        /// Project name
+        name: String,
+        /// Open the browser once the studio is ready
+        #[arg(long)]
+        open: bool,
+        /// Seconds to wait for the studio to become ready
+        #[arg(long, default_value_t = 90)]
+        timeout_secs: u64,
+    },
+    /// Stop a project's studio, or all of them with "all".
+    Stop {
+        /// Project name, or "all"
+        name: String,
     },
 }
 
@@ -165,6 +260,29 @@ fn run_command(command: Commands) -> Result<()> {
         } => {
             run_dump_command(project, out, format, install)?;
         }
+        Commands::List => run_list_command()?,
+        Commands::New {
+            name,
+            r#type,
+            ssh,
+            url,
+            host,
+            port,
+            db,
+            user,
+            password_stdin,
+        } => {
+            run_new_command(name, r#type, ssh, url, host, port, db, user, password_stdin)?;
+        }
+        Commands::Remove { name, yes } => run_remove_command(name, yes)?,
+        Commands::Test { name } => run_test_command(name)?,
+        Commands::Url { name, open, copy } => run_url_command(name, open, copy)?,
+        Commands::Start {
+            name,
+            open,
+            timeout_secs,
+        } => run_start_command(name, open, timeout_secs)?,
+        Commands::Stop { name } => run_stop_command(name)?,
     }
     Ok(())
 }
@@ -742,4 +860,331 @@ fn do_update(app: &mut App) {
         Ok(msg) => app.add_log(msg),
         Err(e) => app.add_log(format!("Self-update error: {:#}", e)),
     }
+}
+
+fn find_project_index(config: &AppConfig, name: &str) -> Option<usize> {
+    config
+        .projects
+        .iter()
+        .position(|p| p.name == name)
+        .or_else(|| {
+            config
+                .projects
+                .iter()
+                .position(|p| p.name.eq_ignore_ascii_case(name))
+        })
+}
+
+fn trunc(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
+fn run_list_command() -> Result<()> {
+    let config = AppConfig::load()?;
+    if config.projects.is_empty() {
+        println!("No projects configured. Launch the TUI and press 'n' to add one.");
+        return Ok(());
+    }
+    let running: Vec<String> = pg_studio::persist::load()
+        .into_iter()
+        .map(|s| s.project_name)
+        .collect();
+    println!(
+        "{:<26} {:<5} {:<38} {:<16} STATUS",
+        "NAME", "TYPE", "TARGET", "DATABASE"
+    );
+    for p in &config.projects {
+        let ty = match p.connection_type {
+            ConnectionType::Ssh => "ssh",
+            ConnectionType::Url => "url",
+            ConnectionType::Local => "local",
+        };
+        let raw_target: String = match p.connection_type {
+            ConnectionType::Ssh => p.ssh_connection.clone(),
+            ConnectionType::Url => {
+                if p.db_url.is_empty() {
+                    p.db_host.clone()
+                } else {
+                    p.db_url.clone()
+                }
+            }
+            ConnectionType::Local => {
+                if p.db_host.is_empty() {
+                    "localhost".to_string()
+                } else {
+                    p.db_host.clone()
+                }
+            }
+        };
+        let (mut target, _) = ProjectConfig::redact_url_password(&raw_target);
+        if target.is_empty() {
+            target = "-".to_string();
+        }
+        let status = if running.contains(&p.name) {
+            "running"
+        } else {
+            "-"
+        };
+        println!(
+            "{:<26} {:<5} {:<38} {:<16} {}",
+            trunc(&p.name, 24),
+            ty,
+            trunc(&target, 36),
+            trunc(&p.db_name, 14),
+            status
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_new_command(
+    name: Option<String>,
+    conn_type: Option<String>,
+    ssh: Option<String>,
+    url: Option<String>,
+    host: Option<String>,
+    port: Option<String>,
+    db: Option<String>,
+    user: Option<String>,
+    password_stdin: bool,
+) -> Result<()> {
+    let fail = |msg: &str| -> ! {
+        eprintln!("{msg}");
+        std::process::exit(1);
+    };
+
+    let ct: ConnectionType = match &conn_type {
+        Some(t) => match t.parse() {
+            Ok(ct) => ct,
+            Err(e) => fail(&format!("{e:#}")),
+        },
+        None => fail("Missing --type (ssh, url or local)."),
+    };
+    let ssh = ssh.unwrap_or_default();
+    let url = url.unwrap_or_default();
+    let host = host.unwrap_or_default();
+    let dbname = match db {
+        Some(d) if !d.trim().is_empty() => d.trim().to_string(),
+        _ => fail("Missing --db <database-name>."),
+    };
+    let dbuser = user.unwrap_or_default();
+
+    match ct {
+        ConnectionType::Ssh if ssh.trim().is_empty() => {
+            fail("--type ssh requires --ssh <user@host>.")
+        }
+        ConnectionType::Url if url.trim().is_empty() && host.trim().is_empty() => {
+            fail("--type url requires --url <postgres://...> or --host <host>.")
+        }
+        _ => {}
+    }
+
+    let derived = ProjectConfig::derive_default_name(ct, &ssh, &host, &dbname);
+    let proj = ProjectConfig {
+        name: name.filter(|n| !n.trim().is_empty()).unwrap_or(derived),
+        connection_type: ct,
+        ssh_connection: ssh,
+        db_url: url,
+        db_host: host,
+        db_port: port.unwrap_or_default(),
+        db_name: dbname,
+        db_user: dbuser,
+        last_opened: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    };
+
+    let mut config = AppConfig::load()?;
+    if config.projects.iter().any(|p| p.name == proj.name) {
+        fail(&format!("A project named '{}' already exists.", proj.name));
+    }
+    if password_stdin {
+        print!("Password: ");
+        std::io::stdout().flush()?;
+        let mut pw = String::new();
+        std::io::stdin().read_line(&mut pw)?;
+        let pw = pw.trim_end_matches(['\r', '\n']);
+        if !pw.is_empty() {
+            proj.save_password(pw)?;
+        }
+    }
+    let saved_name = proj.name.clone();
+    config.projects.push(proj);
+    config.save()?;
+    println!("Created project '{saved_name}'.");
+    Ok(())
+}
+
+fn run_remove_command(name: String, yes: bool) -> Result<()> {
+    let mut app = App::new()?;
+    let Some(idx) = find_project_index(&app.config, &name) else {
+        eprintln!("No project named '{name}'.");
+        std::process::exit(1);
+    };
+    app.selected_project_idx = idx;
+    app.active_pane = ActivePane::ProjectsList;
+    let display_name = app.selected_project_name();
+    if !yes {
+        print!("Delete '{display_name}'? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+    app.delete_selected_project()?;
+    println!("Deleted '{display_name}'.");
+    Ok(())
+}
+
+fn run_test_command(name: String) -> Result<()> {
+    let config = AppConfig::load()?;
+    let Some(idx) = find_project_index(&config, &name) else {
+        eprintln!("No project named '{name}'.");
+        std::process::exit(1);
+    };
+    let proj = config.projects[idx].clone();
+    print!("Testing '{}' ... ", proj.name);
+    std::io::stdout().flush()?;
+    match pg_studio::check::check_connection(&proj) {
+        Ok(msg) => println!("OK ({msg})"),
+        Err(e) => {
+            eprintln!("FAILED: {:#}", e);
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+fn run_url_command(name: String, open_browser: bool, copy: bool) -> Result<()> {
+    let app = App::new()?;
+    let Some(session) = app.session_for(&name) else {
+        eprintln!("'{name}' is not running. Start it with: pg-studio start {name}");
+        std::process::exit(1);
+    };
+    let url = session
+        .lock()
+        .ok()
+        .and_then(|s| s.url().map(str::to_string));
+    let Some(url) = url else {
+        eprintln!("'{name}' has no URL yet.");
+        std::process::exit(1);
+    };
+    if open_browser {
+        open_url(&url)?;
+        println!("Opened {url}");
+    } else if copy {
+        copy_to_clipboard(&url)?;
+        println!("Copied {url}");
+    } else {
+        println!("{url}");
+    }
+    Ok(())
+}
+
+fn run_start_command(name: String, open_browser: bool, timeout_secs: u64) -> Result<()> {
+    let mut app = App::new()?;
+    let Some(idx) = find_project_index(&app.config, &name) else {
+        eprintln!("No project named '{name}'.");
+        std::process::exit(1);
+    };
+    app.selected_project_idx = idx;
+
+    // Already running? Just report the URL.
+    if let Some(session) = app.session_for(&app.selected_project_name()) {
+        let running = session
+            .lock()
+            .map(|s| matches!(s.status, pg_studio::session::SessionStatus::Running));
+        if running.unwrap_or(false)
+            && let Some(url) = session
+                .lock()
+                .ok()
+                .and_then(|s| s.url().map(str::to_string))
+        {
+            println!("Studio already running: {url}");
+            return Ok(());
+        }
+    }
+
+    app.start_selected_project(open_browser);
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        app.poll_auto_open();
+        if let Some(session) = app.session_for(&name) {
+            let (status, error, url) = {
+                let Ok(s) = session.lock() else {
+                    continue;
+                };
+                (s.status, s.error.clone(), s.url().map(str::to_string))
+            };
+            use pg_studio::session::SessionStatus as S;
+            match status {
+                S::Running => {
+                    if let Some(url) = url {
+                        println!("Studio running: {url}");
+                    }
+                    break;
+                }
+                S::Error => {
+                    app.shutdown();
+                    eprintln!(
+                        "Start failed: {}",
+                        error.unwrap_or_else(|| "unknown error".into())
+                    );
+                    std::process::exit(1);
+                }
+                _ => {}
+            }
+        }
+        if Instant::now() >= deadline {
+            app.stop_session_for(&name);
+            app.shutdown();
+            eprintln!("Timed out after {timeout_secs}s waiting for '{name}' to become ready.");
+            std::process::exit(1);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Detach the running studio so it survives this process exiting.
+    app.shutdown();
+    Ok(())
+}
+
+fn run_stop_command(name: String) -> Result<()> {
+    let mut app = App::new()?;
+    if name.eq_ignore_ascii_case("all") {
+        let count = app.sessions.len();
+        app.stop_all_sessions();
+        app.shutdown();
+        println!("Stopped {count} studio(s).");
+        return Ok(());
+    }
+    if find_project_index(&app.config, &name).is_none() {
+        eprintln!("No project named '{name}'.");
+        std::process::exit(1);
+    }
+    app.stop_jobs_for(&name);
+    match app.session_for(&name) {
+        Some(session) => {
+            if let Ok(mut s) = session.lock() {
+                s.stop();
+            }
+            app.shutdown();
+            println!("Stopped '{name}'.");
+        }
+        None => {
+            app.shutdown();
+            println!("'{name}' is not running.");
+        }
+    }
+    Ok(())
 }

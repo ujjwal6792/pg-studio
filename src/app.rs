@@ -630,17 +630,8 @@ impl App {
 
         let mut name = self.input_name.value().trim().to_string();
         if name.is_empty() {
-            let host = match self.connection_type {
-                ConnectionType::Ssh => ssh.clone(),
-                ConnectionType::Url | ConnectionType::Local => {
-                    if db_host.is_empty() {
-                        dbname.clone()
-                    } else {
-                        db_host.clone()
-                    }
-                }
-            };
-            name = format!("{}@{}", dbname, host);
+            name =
+                ProjectConfig::derive_default_name(self.connection_type, &ssh, &db_host, &dbname);
         }
 
         let existing_match = self.config.projects.iter().position(|p| p.name == name);

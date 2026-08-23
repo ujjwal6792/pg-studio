@@ -20,6 +20,21 @@ pub enum ConnectionType {
     Local,
 }
 
+impl std::str::FromStr for ConnectionType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "ssh" => Ok(Self::Ssh),
+            "url" => Ok(Self::Url),
+            "local" => Ok(Self::Local),
+            other => Err(anyhow!(
+                "unknown connection type '{other}' (use ssh, url or local)"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProjectConfig {
     pub name: String,
@@ -42,6 +57,22 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
+    /// Fallback project name used when the user leaves it blank, matching
+    /// the TUI editor: `dbname@host`.
+    pub fn derive_default_name(ct: ConnectionType, ssh: &str, host: &str, dbname: &str) -> String {
+        let host = match ct {
+            ConnectionType::Ssh => ssh.to_string(),
+            _ => {
+                if host.trim().is_empty() {
+                    dbname.to_string()
+                } else {
+                    host.trim().to_string()
+                }
+            }
+        };
+        format!("{dbname}@{host}")
+    }
+
     pub fn save_password(&self, password: &str) -> Result<()> {
         let entry = Entry::new("pg-studio", &self.name)?;
         entry.set_password(password)?;
