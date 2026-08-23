@@ -51,11 +51,20 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-pub fn check_pg_dump() -> Result<()> {
-    which::which("pg_dump").context(
-        "Postgres 'pg_dump' is not installed or not in PATH. Install the PostgreSQL client tools.",
-    )?;
-    Ok(())
+/// Locates pg_dump: PATH first, then known Homebrew keg-only prefixes for
+/// the libpq formula (which is never symlinked into PATH by default).
+pub fn find_pg_dump() -> Option<PathBuf> {
+    if which::which("pg_dump").is_ok() {
+        return Some(PathBuf::from("pg_dump"));
+    }
+    find_in(&[
+        PathBuf::from("/opt/homebrew/opt/libpq/bin/pg_dump"),
+        PathBuf::from("/usr/local/opt/libpq/bin/pg_dump"),
+    ])
+}
+
+fn find_in(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|p| p.is_file()).cloned()
 }
 
 /// Default dump destination: ~/Downloads/<name>-<timestamp>.<ext>
@@ -79,8 +88,10 @@ pub fn default_dump_path(project_name: &str, format: DumpFormat) -> Result<PathB
 }
 
 /// Pure argument builder (unit-testable). The password never appears here -
-/// it travels via the PGPASSWORD environment variable.
+/// it travels via the PGPASSWORD environment variable. `pg_dump_bin` allows
+/// an absolute path for tools that are not on PATH (e.g. Homebrew libpq).
 pub fn build_dump_args(
+    pg_dump_bin: &str,
     host: &str,
     port: u16,
     user: &str,
@@ -88,7 +99,8 @@ pub fn build_dump_args(
     out: &Path,
     format: DumpFormat,
 ) -> Vec<String> {
-    let mut args = vec![
+    let mut args = vec![pg_dump_bin.to_string()];
+    args.extend([
         "--host".to_string(),
         host.to_string(),
         "--port".to_string(),
@@ -99,7 +111,7 @@ pub fn build_dump_args(
         "--no-privileges".to_string(),
         "--file".to_string(),
         out.display().to_string(),
-    ];
+    ]);
     match format {
         DumpFormat::Custom => args.push("--format=custom".to_string()),
         DumpFormat::Plain => args.push("--format=plain".to_string()),
@@ -166,7 +178,13 @@ pub fn run_dump(
     pid_sink: Arc<Mutex<Option<u32>>>,
     log_line: LogFn,
 ) -> Result<(u64, SshTunnelGuard)> {
-    check_pg_dump()?;
+    let pg_dump = find_pg_dump().ok_or_else(|| {
+        anyhow::anyhow!(
+            "pg_dump not found on PATH or in known install locations. \
+             Install the PostgreSQL client tools (e.g. brew install libpq, \
+             apt install postgresql-client, pacman -S postgresql-libs)."
+        )
+    })?;
     if proj.db_name.trim().is_empty() {
         bail!("Project has no database name configured");
     }
@@ -178,6 +196,7 @@ pub fn run_dump(
             let guard = SshTunnelGuard(Some(tunnel));
             let local_port = guard.port();
             let args = build_dump_args(
+                pg_dump.to_string_lossy().as_ref(),
                 "127.0.0.1",
                 local_port,
                 &proj.db_user,
@@ -190,7 +209,15 @@ pub fn run_dump(
         }
         ConnectionType::Url | ConnectionType::Local => {
             let (host, port) = direct_target(proj);
-            let args = build_dump_args(&host, port, &proj.db_user, &proj.db_name, &out, format);
+            let args = build_dump_args(
+                pg_dump.to_string_lossy().as_ref(),
+                &host,
+                port,
+                &proj.db_user,
+                &proj.db_name,
+                &out,
+                format,
+            );
             let size = spawn_and_wait(args, &password, &out, &pid_sink, &log_line)?;
             Ok((size, SshTunnelGuard(None)))
         }
@@ -217,8 +244,8 @@ fn spawn_and_wait(
     pid_sink: &Arc<Mutex<Option<u32>>>,
     log_line: &LogFn,
 ) -> Result<u64> {
-    let mut child: Child = Command::new("pg_dump")
-        .args(&args)
+    let mut child: Child = Command::new(&args[0])
+        .args(&args[1..])
         .env("PGPASSWORD", password)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -263,8 +290,17 @@ mod tests {
     #[test]
     fn dump_args_cover_connection_target_and_format() {
         let out = Path::new("/tmp/x.dump");
-        let args = build_dump_args("127.0.0.1", 5433, "alice", "app", out, DumpFormat::Custom);
+        let args = build_dump_args(
+            "pg_dump",
+            "127.0.0.1",
+            5433,
+            "alice",
+            "app",
+            out,
+            DumpFormat::Custom,
+        );
         let expected = [
+            "pg_dump",
             "--host",
             "127.0.0.1",
             "--port",
@@ -307,5 +343,28 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(2048), "2.0 KiB");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MiB");
+    }
+}
+
+#[cfg(test)]
+mod find_tests {
+    use super::*;
+
+    #[test]
+    fn finds_pg_dump_in_known_locations() {
+        let dir = std::env::temp_dir().join(format!("pgs-find-{}", std::process::id()));
+        let bin = dir.join("bin").join("pg_dump");
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::write(&bin, "#!/bin/sh\n").unwrap();
+        assert_eq!(find_in(&[dir.join("bin").join("pg_dump")]), Some(bin));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn misses_when_absent() {
+        assert_eq!(
+            find_in(&[PathBuf::from("/nonexistent/pg-studio/pg_dump")]),
+            None
+        );
     }
 }
