@@ -221,7 +221,7 @@ impl AppConfig {
     pub fn save(&mut self) -> Result<()> {
         // Sort projects by last opened descending before saving
         self.projects
-            .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+            .sort_by_key(|p| std::cmp::Reverse(p.last_opened));
 
         let config_path = Self::config_file_path()?;
         if let Some(parent) = config_path.parent() {

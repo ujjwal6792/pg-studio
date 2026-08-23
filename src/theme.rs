@@ -187,10 +187,9 @@ fn parse_osc_payload(payload: &str) -> Option<(usize, Color)> {
         (num.parse::<usize>().ok()?, rest)
     } else if let Some(rest) = payload.strip_prefix("10;") {
         (10, rest)
-    } else if let Some(rest) = payload.strip_prefix("11;") {
-        (11, rest)
     } else {
-        return None;
+        let rest = payload.strip_prefix("11;")?;
+        (11, rest)
     };
 
     let rgb = color_part.strip_prefix("rgb:")?;

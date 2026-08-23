@@ -27,7 +27,12 @@ an SSH tunnel, `pg-studio` handles the entire lifecycle for you.
   any unsupported Postgres data types (e.g. `bytea`), and launches the Studio.
 - **In-App Self-Updating (`u` key)**: Press `u` anywhere in the TUI to
   automatically check for and install the latest binary releases directly from
-  GitHub.
+  GitHub. The update runs in the background with a live progress popup - the
+  TUI stays usable and you can cancel between steps.
+- **Database Dump & Safe Restore**: Back up any project's database via
+  `pg_dump` (custom `.dump` or plain `.sql`), and restore a backup into a
+  project's database (`restore-db`). Restores always take a fresh safety
+  backup of the target database first and keep it even if the restore fails.
 
 ## Installation 📦
 
@@ -82,7 +87,12 @@ pg-studio
 - **`pg-studio --check` / `-c`**: Check GitHub for the latest release without
   installing.
 - **`pg-studio --update` / `-u`**: Check for and install the latest GitHub
-  release, then exit.
+  release, then exit (shows live progress).
+- **`pg-studio backup [FILE]`**: Password-free JSON backup of all projects.
+- **`pg-studio restore FILE`**: Import projects from such a backup.
+- **`pg-studio dump <PROJECT> [-o FILE]`**: Database dump via `pg_dump`.
+- **`pg-studio restore-db <PROJECT> <FILE>`**: Restore a `.dump`/`.sql`
+  backup into the project's database after taking a mandatory safety backup.
 - **`pg-studio --version` / `-v` / `-V`**: Print the current version.
 - **`pg-studio --help` / `-h`**: Print usage help.
 

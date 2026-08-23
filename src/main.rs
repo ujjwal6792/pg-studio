@@ -11,7 +11,7 @@ use pg_studio::{
     theme,
     tui::Tui,
     ui::{content_areas, draw},
-    updater::{check_for_update, update_cli},
+    updater::check_for_update,
 };
 use ratatui::layout::Rect;
 use std::io::Write as _;
@@ -41,6 +41,8 @@ Backups:
   pg-studio backup [FILE]            password-free backup of all projects
   pg-studio restore FILE             import projects from a backup
   pg-studio dump my-project          database dump via pg_dump
+  pg-studio restore-db my-project FILE
+                                     restore a DB backup (safety dump taken first)
 ";
 
 #[derive(Parser)]
@@ -91,6 +93,22 @@ enum Commands {
         format: Option<String>,
         /// If pg_dump is missing, open an installer terminal via the detected
         /// package manager instead of failing.
+        #[arg(long)]
+        install: bool,
+    },
+    /// Restore a database backup file into a project's database, overwriting
+    /// its contents. A fresh safety backup of the target database is always
+    /// taken beforehand and is kept even if the restore fails.
+    RestoreDb {
+        /// Project name whose database will be overwritten
+        project: String,
+        /// Backup file to restore (.dump custom format / .sql plain SQL)
+        file: PathBuf,
+        /// Skip the confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// If the PostgreSQL tools are missing, open an installer terminal via
+        /// the detected package manager instead of failing.
         #[arg(long)]
         install: bool,
     },
@@ -176,8 +194,23 @@ fn main() -> Result<()> {
     }
 
     if cli.update {
-        match update_cli() {
-            Ok(msg) => println!("{msg}"),
+        let mut spinner =
+            pg_studio::spinner::Spinner::start(pg_studio::updater::UpdatePhase::Checking.label());
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let result = pg_studio::updater::update_with_progress(
+            &|phase, version| {
+                let note = if version.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (v{version})")
+                };
+                spinner.set_message(format!("{}{note}", phase.label()));
+            },
+            &cancelled,
+        );
+        spinner.finish();
+        match result {
+            Ok(outcome) => println!("{}", outcome.message()),
             Err(e) => {
                 eprintln!("Self-update error: {:#}", e);
                 std::process::exit(1);
@@ -187,7 +220,10 @@ fn main() -> Result<()> {
     }
 
     if cli.check {
-        match check_for_update() {
+        let mut spinner = pg_studio::spinner::Spinner::start("Checking GitHub Releases...");
+        let result = check_for_update();
+        spinner.finish();
+        match result {
             Ok(msg) => println!("{msg}"),
             Err(e) => {
                 eprintln!("Update check error: {:#}", e);
@@ -260,6 +296,14 @@ fn run_command(command: Commands) -> Result<()> {
         } => {
             run_dump_command(project, out, format, install)?;
         }
+        Commands::RestoreDb {
+            project,
+            file,
+            yes,
+            install,
+        } => {
+            run_restore_db_command(project, file, yes, install)?;
+        }
         Commands::List => run_list_command()?,
         Commands::New {
             name,
@@ -287,6 +331,41 @@ fn run_command(command: Commands) -> Result<()> {
     Ok(())
 }
 
+/// Ensures the PostgreSQL client tools are usable. When `pg_dump` is missing,
+/// either prints install guidance and exits, or (with `install`) opens an
+/// installer terminal in a new window. Returns `Ok(true)` when an installer
+/// was opened and the caller should stop.
+fn ensure_pg_tools(install: bool) -> Result<bool> {
+    if pg_studio::dbbackup::find_pg_dump().is_some() {
+        return Ok(false);
+    }
+    match pg_studio::installer::detect_package_manager() {
+        Some(pm) if install => {
+            let script = pg_studio::installer::open_installer_terminal(pm)?;
+            println!(
+                "Installer opened in a new terminal window (script: {}).",
+                script.display()
+            );
+            println!("Complete it there, then rerun this command.");
+            Ok(true)
+        }
+        Some(pm) => {
+            eprintln!(
+                "pg_dump is not installed. Install via {} with:\n  {}\nOr rerun with --install to open an installer terminal.",
+                pm.name(),
+                pg_studio::installer::suggest_command(pm)
+            );
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!(
+                "pg_dump not found and no supported package manager detected. Install the PostgreSQL client tools manually, e.g. brew install libpq."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn run_dump_command(
     project: String,
     out: Option<PathBuf>,
@@ -294,46 +373,11 @@ fn run_dump_command(
     install: bool,
 ) -> Result<()> {
     // Offer a guided install when pg_dump is missing.
-    if pg_studio::dbbackup::find_pg_dump().is_none() {
-        match pg_studio::installer::detect_package_manager() {
-            Some(pm) if install => {
-                let script = pg_studio::installer::open_installer_terminal(pm)?;
-                println!(
-                    "Installer opened in a new terminal window (script: {}).",
-                    script.display()
-                );
-                println!("Complete it there, then rerun this command.");
-                return Ok(());
-            }
-            Some(pm) => {
-                eprintln!(
-                    "pg_dump is not installed. Install via {} with:\n  {}\nOr rerun with --install to open an installer terminal.",
-                    pm.name(),
-                    pg_studio::installer::suggest_command(pm)
-                );
-                std::process::exit(1);
-            }
-            None => {
-                eprintln!(
-                    "pg_dump not found and no supported package manager detected. Install the PostgreSQL client tools manually, e.g. brew install libpq."
-                );
-                std::process::exit(1);
-            }
-        }
+    if ensure_pg_tools(install)? {
+        return Ok(());
     }
     let config = AppConfig::load()?;
-    let proj = config
-        .projects
-        .iter()
-        .find(|p| p.name == project)
-        .or_else(|| {
-            config
-                .projects
-                .iter()
-                .find(|p| p.name.eq_ignore_ascii_case(&project))
-        })
-        .cloned();
-    let Some(proj) = proj else {
+    let Some(idx) = find_project_index(&config, &project) else {
         eprintln!(
             "No project named '{project}'. Projects: {}",
             if config.projects.is_empty() {
@@ -349,6 +393,7 @@ fn run_dump_command(
         );
         std::process::exit(1);
     };
+    let proj = config.projects[idx].clone();
 
     let format = match format.as_deref() {
         Some("custom") | None => match &out {
@@ -390,10 +435,156 @@ fn run_dump_command(
     Ok(())
 }
 
+fn run_restore_db_command(project: String, file: PathBuf, yes: bool, install: bool) -> Result<()> {
+    if !file.is_file() {
+        eprintln!("Backup file not found: {}", file.display());
+        std::process::exit(1);
+    }
+    // The safety dump needs pg_dump; the restore itself needs pg_restore or psql.
+    if ensure_pg_tools(install)? {
+        return Ok(());
+    }
+    let tool = pg_studio::dbbackup::restore_tool_for(&file);
+    if tool.find_binary().is_none() {
+        eprintln!(
+            "{} is not installed. Install the PostgreSQL client tools (e.g. brew install libpq).",
+            tool.binary_name()
+        );
+        std::process::exit(1);
+    }
+
+    let config = AppConfig::load()?;
+    let Some(idx) = find_project_index(&config, &project) else {
+        eprintln!("No project named '{project}'.");
+        std::process::exit(1);
+    };
+    let proj = config.projects[idx].clone();
+
+    let safety = match pg_studio::dbbackup::safety_backup_path(&file) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e:#}");
+            std::process::exit(1);
+        }
+    };
+    if safety.exists() {
+        eprintln!(
+            "Refusing to overwrite existing safety backup: {}",
+            safety.display()
+        );
+        std::process::exit(1);
+    }
+
+    if !yes {
+        println!(
+            "About to RESTORE into database '{}' of project '{}'.",
+            proj.db_name, proj.name
+        );
+        println!("  Backup file : {}", file.display());
+        println!("  Safety dump : {}", safety.display());
+        println!(
+            "  Existing objects in '{}' will be dropped and replaced.",
+            proj.db_name
+        );
+        print!("Continue? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Safeguard: dump the target first. If this fails, nothing is modified.
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = captured.clone();
+    let mut spinner = pg_studio::spinner::Spinner::start(format!(
+        "Safety backup of '{}' -> {} ...",
+        proj.db_name,
+        safety.display()
+    ));
+    let pid_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let safety_format = tool.safety_dump_format();
+    let dump_result = pg_studio::dbbackup::run_dump(
+        &proj,
+        safety.clone(),
+        safety_format,
+        pid_sink,
+        std::sync::Arc::new(move |line: String| {
+            if let Ok(mut buf) = sink.lock() {
+                buf.push(line);
+            }
+        }),
+    );
+    if let Err(e) = dump_result {
+        spinner.finish();
+        print_captured_tool_output(&captured);
+        eprintln!("Safety backup failed: {:#}", e);
+        eprintln!("The target database was NOT modified.");
+        std::process::exit(1);
+    }
+    spinner.finish();
+    println!("Safety backup written: {}", safety.display());
+
+    // Restore.
+    let sink = captured.clone();
+    let started = Instant::now();
+    let mut spinner = pg_studio::spinner::Spinner::start(format!(
+        "Restoring {} into '{}' ...",
+        file.display(),
+        proj.db_name
+    ));
+    let pid_sink = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let restore_result = pg_studio::dbbackup::run_restore(
+        &proj,
+        &file,
+        pid_sink,
+        std::sync::Arc::new(move |line: String| {
+            if let Ok(mut buf) = sink.lock() {
+                buf.push(line);
+            }
+        }),
+    );
+    spinner.finish();
+    if let Err(e) = restore_result {
+        eprintln!("Restore failed: {:#}", e);
+        print_captured_tool_output(&captured);
+        eprintln!(
+            "Your pre-restore safety backup is preserved at: {}",
+            safety.display()
+        );
+        std::process::exit(1);
+    }
+    println!(
+        "Done in {:.1}s: restored {} into project '{}'.",
+        started.elapsed().as_secs_f32(),
+        file.display(),
+        proj.name
+    );
+    println!("Safety backup kept at: {}", safety.display());
+    Ok(())
+}
+
+/// Prints tool stderr lines collected during a spinner-wrapped run, so
+/// diagnostics never interleave with the animation.
+fn print_captured_tool_output(captured: &std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    if let Ok(buf) = captured.lock()
+        && !buf.is_empty()
+    {
+        eprintln!("--- tool output ---");
+        for line in buf.iter() {
+            eprintln!("{line}");
+        }
+        eprintln!("-------------------");
+    }
+}
+
 fn run_app(tui: &mut Tui, app: &mut App) -> Result<()> {
     let mut last_ctrl_c: Option<Instant> = None;
     loop {
         app.poll_auto_open();
+        app.poll_update_finished();
         let size = tui.terminal.size()?;
         let frame_area = Rect::new(0, 0, size.width, size.height);
         tui.terminal.draw(|f| draw(f, app))?;
@@ -515,6 +706,21 @@ fn select_tab_at_column(app: &mut App, column: u16, details_area: Rect) {
 
 /// Dispatches a key press. Returns `Ok(true)` when the app should exit.
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    // While an update runs, the popup's cancel keys take priority so the TUI
+    // never feels locked up; every other key keeps working as usual. Ctrl+C
+    // is left alone so the double-press quit flow still works.
+    if app.update_in_progress()
+        && !key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL)
+        && matches!(
+            key.code,
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('x')
+        )
+    {
+        app.cancel_update();
+        return Ok(false);
+    }
     match app.mode {
         AppMode::Normal => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -569,7 +775,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                 }
             }
             KeyCode::Char('u') => {
-                do_update(app);
+                app.start_update();
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 app.move_selection(-1);
@@ -699,6 +905,17 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                     app.confirm_action = None;
                     app.mode = AppMode::Normal;
                 }
+                Some(ConfirmationAction::RestoreDatabase) => {
+                    let proj = app.config.projects[app.selected_project_idx].clone();
+                    let file = app.pending_restore_file.take().unwrap_or_default();
+                    app.confirm_action = None;
+                    app.mode = AppMode::Normal;
+                    if file.as_os_str().is_empty() {
+                        app.add_log("Restore aborted: no backup file staged.".to_string());
+                    } else {
+                        app.spawn_restore_job(proj, file);
+                    }
+                }
                 Some(ConfirmationAction::MissingPgDump) => {
                     let pm = app.pending_pkg_manager.take();
                     app.confirm_action = None;
@@ -727,6 +944,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                 let was_cancel_edit = app.confirm_action == Some(ConfirmationAction::CancelEdit);
                 app.confirm_action = None;
                 app.pending_pkg_manager = None;
+                app.pending_restore_file = None;
                 app.mode = if was_cancel_edit {
                     AppMode::EditingForm
                 } else {
@@ -823,7 +1041,7 @@ fn execute_help_action(app: &mut App, action: HelpAction) -> Result<bool> {
         }
         ExportProjects => do_export(app),
         ImportProjects => do_import(app),
-        UpdateApp => do_update(app),
+        UpdateApp => app.start_update(),
         ScrollLogsUp => app.scroll_logs(-10),
         ScrollLogsDown => app.scroll_logs(10),
         CloseHelp => app.mode = AppMode::Normal,
@@ -851,14 +1069,6 @@ fn do_import(app: &mut App) {
             "Imported {imported} project(s), skipped {skipped} existing."
         )),
         Err(e) => app.add_log(format!("Import failed: {:#}", e)),
-    }
-}
-
-fn do_update(app: &mut App) {
-    app.add_log("Checking GitHub Releases for updates...".to_string());
-    match update_cli() {
-        Ok(msg) => app.add_log(msg),
-        Err(e) => app.add_log(format!("Self-update error: {:#}", e)),
     }
 }
 

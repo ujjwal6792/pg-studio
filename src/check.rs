@@ -116,10 +116,9 @@ pub fn parse_full_pg_url(url: &str) -> Option<ParsedPgUrl> {
         return None;
     }
     let rest = &trimmed[scheme.len() + 3..];
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i + 1..]),
-        None => return None, // no database segment -> treat as incomplete
-    };
+    // No database segment -> treat as incomplete.
+    let i = rest.find('/')?;
+    let (authority, path) = (&rest[..i], &rest[i + 1..]);
     if authority.is_empty() {
         return None;
     }

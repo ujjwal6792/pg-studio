@@ -10,7 +10,9 @@ use crate::theme::Theme;
 use anyhow::{Result, anyhow};
 use chrono::{Local, TimeZone};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tui_input::Input;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -54,6 +56,9 @@ pub enum ConfirmationAction {
     /// pg_dump is missing; Enter opens a package-manager installer in an
     /// external terminal (manager stored in `pending_pkg_manager`).
     MissingPgDump,
+    /// Overwrite the selected project's database from
+    /// `pending_restore_file`; a safety dump is always taken first.
+    RestoreDatabase,
 }
 
 /// What pressing Enter on a highlighted keybinding entry does.
@@ -153,7 +158,7 @@ pub fn help_entries() -> Vec<HelpEntry> {
         ),
         e(
             "b",
-            "Backup menu: app backup, restore, or DB dump",
+            "Backup menu: app backup, restore, DB dump & restore",
             Some(BackupMenu),
         ),
         e(
@@ -323,6 +328,16 @@ impl FormField {
     }
 }
 
+/// Shared state for an in-flight self-update so the TUI keeps responding,
+/// shows live progress, and can cancel at phase boundaries.
+pub struct UpdateTracker {
+    pub phase: Arc<Mutex<crate::updater::UpdatePhase>>,
+    pub note: Arc<Mutex<String>>,
+    pub cancel: Arc<AtomicBool>,
+    pub started_at: Instant,
+    pub finished: Arc<Mutex<Option<Result<crate::updater::UpdateOutcome, String>>>>,
+}
+
 pub struct App {
     pub config: AppConfig,
     pub selected_project_idx: usize,
@@ -342,6 +357,11 @@ pub struct App {
     pub input_backup_path: Input,
     /// Package manager chosen for a pending pg_dump install confirmation.
     pub pending_pkg_manager: Option<crate::installer::PackageManager>,
+    /// Backup file staged for a pending restore-into-database confirmation.
+    pub pending_restore_file: Option<PathBuf>,
+
+    /// In-flight self-update, if any (`u` / help screen).
+    pub update_tracker: Option<Arc<UpdateTracker>>,
 
     // Keybindings screen ('?')
     pub help_selected: usize,
@@ -399,7 +419,7 @@ impl App {
         let mut config = config;
         config
             .projects
-            .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+            .sort_by_key(|p| std::cmp::Reverse(p.last_opened));
 
         let mut app = Self {
             config,
@@ -416,6 +436,8 @@ impl App {
             backup_menu_idx: 0,
             input_backup_path: Input::default(),
             pending_pkg_manager: None,
+            pending_restore_file: None,
+            update_tracker: None,
 
             help_selected: 0,
             help_scroll: 0,
@@ -708,7 +730,7 @@ impl App {
         }
         self.config
             .projects
-            .sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+            .sort_by_key(|p| std::cmp::Reverse(p.last_opened));
         self.load_selected_into_form();
         (imported, skipped)
     }
@@ -758,6 +780,7 @@ impl App {
             "Download app backup",
             "Restore app backup from file",
             "Dump selected project DB (.dump custom / .sql plain)",
+            "Restore DB backup into selected project",
         ]
     }
 
@@ -779,11 +802,16 @@ impl App {
         let default_path = match self.backup_menu_idx {
             0 => crate::backup::default_backup_path(),
             1 => AppConfig::export_file_path(),
-            _ => {
+            2 => {
                 let name = self.selected_project_name();
                 let format = DumpFormat::Custom;
                 dbbackup::default_dump_path(&name, format)
             }
+            _ => dbbackup::latest_db_backup_file()
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    crate::backup::download_dir().map(|dir| dir.join("backup.dump"))
+                }),
         };
         self.input_backup_path = Input::from(
             default_path
@@ -830,25 +858,7 @@ impl App {
                     return;
                 }
                 if dbbackup::find_pg_dump().is_none() {
-                    match crate::installer::detect_package_manager() {
-                        Some(pm) => {
-                            self.pending_pkg_manager = Some(pm);
-                            self.confirm_action = Some(ConfirmationAction::MissingPgDump);
-                            self.mode = AppMode::ConfirmDialog;
-                        }
-                        None => {
-                            self.add_log(
-                                "pg_dump not found and no supported package manager detected."
-                                    .to_string(),
-                            );
-                            self.add_log(
-                                "Install the PostgreSQL client tools manually, e.g.:".to_string(),
-                            );
-                            self.add_log("  brew install libpq".to_string());
-                            self.add_log("  sudo apt install postgresql-client".to_string());
-                            self.add_log("  sudo pacman -S postgresql-libs".to_string());
-                        }
-                    }
+                    self.offer_pg_tool_install();
                     return;
                 }
                 let proj = self.config.projects[self.selected_project_idx].clone();
@@ -856,7 +866,63 @@ impl App {
                 self.spawn_dump_job(proj, path, format);
                 self.mode = AppMode::Normal;
             }
+            3 => {
+                if self.config.projects.is_empty() {
+                    self.add_log("Restore aborted: no project selected.".to_string());
+                    return;
+                }
+                if !path.is_file() {
+                    self.add_log(format!(
+                        "Restore aborted: backup file not found: {}",
+                        path.display()
+                    ));
+                    return;
+                }
+                // Both the safety dump and the restore itself need client tools.
+                let tool = dbbackup::restore_tool_for(&path);
+                let missing = [
+                    dbbackup::find_pg_dump().is_none().then_some("pg_dump"),
+                    tool.find_binary().is_none().then_some(tool.binary_name()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
+                if !missing.is_empty() {
+                    self.add_log(format!(
+                        "Restore aborted: {missing} not found. Install the PostgreSQL client tools."
+                    ));
+                    self.add_log(
+                        "  brew install libpq | sudo apt install postgresql-client | sudo pacman -S postgresql-libs"
+                            .to_string(),
+                    );
+                    return;
+                }
+                self.pending_restore_file = Some(path.clone());
+                self.confirm_action = Some(ConfirmationAction::RestoreDatabase);
+                self.mode = AppMode::ConfirmDialog;
+            }
             _ => {}
+        }
+    }
+
+    /// Offers the guided package-manager install when pg tools are missing.
+    fn offer_pg_tool_install(&mut self) {
+        match crate::installer::detect_package_manager() {
+            Some(pm) => {
+                self.pending_pkg_manager = Some(pm);
+                self.confirm_action = Some(ConfirmationAction::MissingPgDump);
+                self.mode = AppMode::ConfirmDialog;
+            }
+            None => {
+                self.add_log(
+                    "pg_dump not found and no supported package manager detected.".to_string(),
+                );
+                self.add_log("Install the PostgreSQL client tools manually, e.g.:".to_string());
+                self.add_log("  brew install libpq".to_string());
+                self.add_log("  sudo apt install postgresql-client".to_string());
+                self.add_log("  sudo pacman -S postgresql-libs".to_string());
+            }
         }
     }
 
@@ -924,6 +990,177 @@ impl App {
                     } else {
                         add_global_log(&global_logs, format!("Dump failed: {name}: {:#}", e));
                     }
+                }
+            }
+        });
+    }
+
+    /// Restores `backup_file` into `proj`'s database on a background thread,
+    /// always taking a safety dump of the target first. Both phases run as
+    /// one cancellable Process-tab job.
+    pub fn spawn_restore_job(&mut self, proj: ProjectConfig, backup_file: PathBuf) {
+        let name = proj.name.clone();
+        let job = Arc::new(Mutex::new(Job {
+            label: format!("DB restore · {name}"),
+            status: JobStatus::Running,
+            started_at: chrono::Utc::now().timestamp(),
+            detail: backup_file.to_string_lossy().to_string(),
+            error: None,
+            pid: Arc::new(Mutex::new(None)),
+        }));
+        self.jobs.push(job.clone());
+        let tool = dbbackup::restore_tool_for(&backup_file);
+        let safety_path = match dbbackup::safety_backup_path(&backup_file) {
+            Ok(p) => p,
+            Err(e) => {
+                self.add_log(format!("Restore aborted: {:#}", e));
+                return;
+            }
+        };
+        if safety_path.exists() {
+            self.add_log(format!(
+                "Restore aborted: refusing to overwrite existing file {}",
+                safety_path.display()
+            ));
+            return;
+        }
+        self.add_log(format!(
+            "Restoring '{}' into '{name}' ({}); a safety dump of the current database is taken first...",
+            backup_file.display(),
+            match tool {
+                dbbackup::RestoreTool::PgRestore => "custom format",
+                dbbackup::RestoreTool::Psql => "plain SQL",
+            }
+        ));
+
+        let global_logs = self.logs.clone();
+        let safety = safety_path.clone();
+
+        std::thread::spawn(move || {
+            // Phase 1: mandatory pre-restore safety dump.
+            if let Ok(mut j) = job.lock() {
+                j.detail = format!("safety dump -> {}", safety.display());
+            }
+            add_global_log(
+                &global_logs,
+                format!("Safety dump of '{name}' -> {}", safety.display()),
+            );
+            let pid_sink: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+            if let Ok(mut j) = job.lock() {
+                j.pid = pid_sink.clone();
+            }
+            let stderr_logs = global_logs.clone();
+            let log_line: dbbackup::LogFn =
+                std::sync::Arc::new(move |line: String| add_global_log(&stderr_logs, line));
+            let cancelled = || {
+                job.lock()
+                    .map(|j| j.status == JobStatus::Cancelled)
+                    .unwrap_or(false)
+            };
+            let dump_result = dbbackup::run_dump(
+                &proj,
+                safety.clone(),
+                tool.safety_dump_format(),
+                pid_sink,
+                log_line,
+            );
+
+            if let Err(e) = dump_result {
+                let was_cancelled = cancelled();
+                if let Ok(mut j) = job.lock()
+                    && j.status == JobStatus::Running
+                {
+                    j.status = if was_cancelled {
+                        JobStatus::Cancelled
+                    } else {
+                        JobStatus::Failed
+                    };
+                    j.error = Some(format!("{:#}", e));
+                }
+                if was_cancelled {
+                    add_global_log(&global_logs, format!("Restore cancelled: {name}"));
+                } else {
+                    // The target was never touched - make that explicit.
+                    add_global_log(
+                        &global_logs,
+                        format!(
+                            "Safety dump failed, restore aborted; '{name}' is unchanged: {:#}",
+                            e
+                        ),
+                    );
+                }
+                return;
+            }
+
+            if cancelled() {
+                if let Ok(mut j) = job.lock()
+                    && j.status == JobStatus::Running
+                {
+                    j.status = JobStatus::Cancelled;
+                }
+                add_global_log(&global_logs, format!("Restore cancelled: {name}"));
+                return;
+            }
+
+            // Phase 2: restore into the database.
+            if let Ok(mut j) = job.lock() {
+                j.detail = format!("restoring {}", backup_file.display());
+            }
+            add_global_log(
+                &global_logs,
+                format!("Safety dump written: {}", safety.display()),
+            );
+            add_global_log(
+                &global_logs,
+                format!("Restoring {} ...", backup_file.display()),
+            );
+            let pid_sink: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+            if let Ok(mut j) = job.lock() {
+                j.pid = pid_sink.clone();
+            }
+            let stderr_logs = global_logs.clone();
+            let log_line: dbbackup::LogFn =
+                std::sync::Arc::new(move |line: String| add_global_log(&stderr_logs, line));
+            match dbbackup::run_restore(&proj, &backup_file, pid_sink, log_line) {
+                Ok(_guard) => {
+                    if let Ok(mut j) = job.lock()
+                        && j.status == JobStatus::Running
+                    {
+                        j.status = JobStatus::Done;
+                        j.detail = format!("restored · safety dump: {}", safety.display());
+                    }
+                    add_global_log(
+                        &global_logs,
+                        format!(
+                            "Restore complete: '{name}' now matches {}",
+                            backup_file.display()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    let was_cancelled = cancelled();
+                    if let Ok(mut j) = job.lock()
+                        && j.status == JobStatus::Running
+                    {
+                        j.status = if was_cancelled {
+                            JobStatus::Cancelled
+                        } else {
+                            JobStatus::Failed
+                        };
+                        j.error = Some(format!("{:#}", e));
+                    }
+                    if was_cancelled {
+                        add_global_log(&global_logs, format!("Restore cancelled: {name}"));
+                    } else {
+                        add_global_log(&global_logs, format!("Restore failed: {name}: {:#}", e));
+                    }
+                    add_global_log(
+                        &global_logs,
+                        format!(
+                            "The pre-restore safety dump is preserved at {}",
+                            safety.display()
+                        ),
+                    );
                 }
             }
         });
@@ -1410,6 +1647,77 @@ impl App {
             None => self.add_log("No running session URL to copy.".to_string()),
         }
     }
+
+    // --- Self-update ('u') ---
+
+    /// Kicks off a self-update on a background thread so the UI keeps
+    /// responding; progress is surfaced via the update popup and Logs.
+    pub fn start_update(&mut self) {
+        if self.update_tracker.is_some() {
+            self.add_log("An update is already in progress.".to_string());
+            return;
+        }
+        self.add_log("Checking GitHub Releases for updates...".to_string());
+        let tracker = Arc::new(UpdateTracker {
+            phase: Arc::new(Mutex::new(crate::updater::UpdatePhase::Checking)),
+            note: Arc::new(Mutex::new(String::new())),
+            cancel: Arc::new(AtomicBool::new(false)),
+            started_at: Instant::now(),
+            finished: Arc::new(Mutex::new(None)),
+        });
+        self.update_tracker = Some(tracker.clone());
+
+        std::thread::spawn(move || {
+            let result = crate::updater::update_with_progress(
+                &|phase, note| {
+                    if let Ok(mut p) = tracker.phase.lock() {
+                        *p = phase;
+                    }
+                    if let Ok(mut n) = tracker.note.lock() {
+                        *n = format!("v{note}");
+                    }
+                },
+                &tracker.cancel,
+            );
+            let result = result.map_err(|e| format!("{:#}", e));
+            if let Ok(mut f) = tracker.finished.lock() {
+                *f = Some(result);
+            }
+        });
+    }
+
+    /// True while a self-update is running (popup shown, cancel available).
+    pub fn update_in_progress(&self) -> bool {
+        self.update_tracker.is_some()
+    }
+
+    /// Requests cancellation; takes effect at the next update phase boundary.
+    pub fn cancel_update(&mut self) {
+        if let Some(tracker) = &self.update_tracker {
+            tracker.cancel.store(true, Ordering::Relaxed);
+            self.add_log("Cancelling update after the current step...".to_string());
+        }
+    }
+
+    /// Collects the finished update outcome and reports it in the Logs pane.
+    pub fn poll_update_finished(&mut self) {
+        let Some(tracker) = &self.update_tracker else {
+            return;
+        };
+        let finished = tracker.finished.lock().ok().and_then(|mut f| f.take());
+        let Some(result) = finished else {
+            return;
+        };
+        self.update_tracker = None;
+        match result {
+            Ok(outcome) => {
+                let msg = outcome.message();
+                self.status_message = msg.clone();
+                self.add_log(msg);
+            }
+            Err(e) => self.add_log(format!("Self-update error: {e}")),
+        }
+    }
 }
 
 fn push_session_log(session: &Arc<Mutex<RunningSession>>, msg: String) {
@@ -1747,6 +2055,8 @@ mod tests {
             backup_menu_idx: 0,
             input_backup_path: Input::default(),
             pending_pkg_manager: None,
+            pending_restore_file: None,
+            update_tracker: None,
             help_selected: 0,
             help_scroll: 0,
             jobs: Vec::new(),

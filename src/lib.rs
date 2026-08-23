@@ -8,6 +8,7 @@ pub mod installer;
 pub mod open;
 pub mod persist;
 pub mod session;
+pub mod spinner;
 pub mod ssh;
 pub mod theme;
 pub mod tui;

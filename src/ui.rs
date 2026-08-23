@@ -59,6 +59,79 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.mode == AppMode::BackupMenu {
         render_backup_menu(f, app);
     }
+    if app.update_in_progress() {
+        render_update_popup(f, app);
+    }
+}
+
+/// Centered progress popup for an in-flight self-update. Purely informational
+/// - the UI stays fully interactive and Esc/C cancels at the next phase.
+fn render_update_popup(f: &mut Frame, app: &App) {
+    let Some(tracker) = &app.update_tracker else {
+        return;
+    };
+    let phase = tracker.phase.lock().ok().map(|p| *p);
+    let note = tracker
+        .note
+        .lock()
+        .ok()
+        .map(|n| n.clone())
+        .unwrap_or_default();
+    let elapsed = tracker.started_at.elapsed().as_secs();
+
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let frame = FRAMES[(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_millis() as usize
+        / 100)
+        % FRAMES.len()];
+
+    let (phase_text, phase_color) = match phase {
+        Some(crate::updater::UpdatePhase::Checking) => {
+            ("Checking GitHub Releases...".to_string(), app.theme.info)
+        }
+        _ => (
+            format!("Downloading & installing update {note}..."),
+            app.theme.warn,
+        ),
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" {frame} {phase_text}"),
+            Style::default().fg(phase_color),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" Elapsed {elapsed}s"),
+            Style::default().fg(app.theme.muted),
+        )),
+        Line::from(vec![
+            Span::styled(
+                " Esc ",
+                Style::default()
+                    .fg(app.theme.warn)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "/C cancels between steps · TUI stays usable",
+                Style::default().fg(app.theme.muted),
+            ),
+        ]),
+    ];
+
+    let width = 52u16.min(f.area().width.saturating_sub(4));
+    let area = centered_rect_fixed(width, 6, f.area());
+    let block = Block::default()
+        .title(" Software Update ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.accent))
+        .padding(Padding::new(2, 2, 1, 0));
+
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Centered backup menu: action list plus an editable destination path.
@@ -1036,6 +1109,25 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
                     crate::installer::suggest_command(pm)
                 ),
                 app.theme.accent,
+            )
+        }
+        ConfirmationAction::RestoreDatabase => {
+            let proj = &app.config.projects[app.selected_project_idx];
+            let file = app
+                .pending_restore_file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let safety = crate::dbbackup::safety_backup_path(std::path::Path::new(&file))
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            (
+                " Restore Database ",
+                format!(
+                    "Overwrite database '{}' of project '{}' with:\n{}\n\nObjects will be dropped and replaced. A safety backup\nwill be taken first and kept at:\n{}",
+                    proj.db_name, proj.name, file, safety
+                ),
+                app.theme.error,
             )
         }
     };

@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -31,7 +31,7 @@ jobs:
           tar -czvf ../../../pg-studio-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz pg-studio
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: pg-studio-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
         env:

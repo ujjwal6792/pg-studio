@@ -51,16 +51,29 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Locates pg_dump: PATH first, then known Homebrew keg-only prefixes for
-/// the libpq formula (which is never symlinked into PATH by default).
-pub fn find_pg_dump() -> Option<PathBuf> {
-    if which::which("pg_dump").is_ok() {
-        return Some(PathBuf::from("pg_dump"));
+/// Locates a PostgreSQL client binary: PATH first, then known Homebrew
+/// keg-only prefixes for the libpq formula (which is never symlinked into
+/// PATH by default).
+fn find_tool(name: &str) -> Option<PathBuf> {
+    if which::which(name).is_ok() {
+        return Some(PathBuf::from(name));
     }
     find_in(&[
-        PathBuf::from("/opt/homebrew/opt/libpq/bin/pg_dump"),
-        PathBuf::from("/usr/local/opt/libpq/bin/pg_dump"),
+        PathBuf::from(format!("/opt/homebrew/opt/libpq/bin/{name}")),
+        PathBuf::from(format!("/usr/local/opt/libpq/bin/{name}")),
     ])
+}
+
+pub fn find_pg_dump() -> Option<PathBuf> {
+    find_tool("pg_dump")
+}
+
+pub fn find_pg_restore() -> Option<PathBuf> {
+    find_tool("pg_restore")
+}
+
+pub fn find_psql() -> Option<PathBuf> {
+    find_tool("psql")
 }
 
 fn find_in(candidates: &[PathBuf]) -> Option<PathBuf> {
@@ -120,7 +133,7 @@ pub fn build_dump_args(
     args
 }
 
-/// A background pg_dump job shown in the Process tab.
+/// A background pg_dump/pg_restore job shown in the Process tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobStatus {
     Running,
@@ -141,7 +154,7 @@ pub struct Job {
 }
 
 impl Job {
-    /// Terminates the pg_dump process, if still running.
+    /// Terminates the running pg_dump/pg_restore/psql process, if any.
     pub fn cancel(&self) {
         let pid = self.pid.lock().ok().and_then(|mut slot| slot.take());
         if let Some(pid) = pid {
@@ -204,7 +217,9 @@ pub fn run_dump(
                 &out,
                 format,
             );
-            let size = spawn_and_wait(args, &password, &out, &pid_sink, &log_line)?;
+            spawn_and_wait(args, &password, &pid_sink, &log_line)?;
+            verify_dump_output(&out)?;
+            let size = fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
             Ok((size, guard))
         }
         ConnectionType::Url | ConnectionType::Local => {
@@ -218,10 +233,20 @@ pub fn run_dump(
                 &out,
                 format,
             );
-            let size = spawn_and_wait(args, &password, &out, &pid_sink, &log_line)?;
+            spawn_and_wait(args, &password, &pid_sink, &log_line)?;
+            verify_dump_output(&out)?;
+            let size = fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
             Ok((size, SshTunnelGuard(None)))
         }
     }
+}
+
+/// Guards against a silent empty dump (e.g. a dropped connection).
+fn verify_dump_output(out: &Path) -> Result<()> {
+    if fs::metadata(out).map(|m| m.len()).unwrap_or(0) == 0 {
+        bail!("pg_dump produced an empty file");
+    }
+    Ok(())
 }
 
 /// Keeps an SSH tunnel alive for the duration of a dump.
@@ -233,6 +258,257 @@ impl SshTunnelGuard {
     }
 }
 
+/// Tool that performs a restore for a given backup file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreTool {
+    /// `.dump` custom-format archives, restored with pg_restore.
+    PgRestore,
+    /// `.sql` plain scripts, replayed with psql.
+    Psql,
+}
+
+impl RestoreTool {
+    pub fn binary_name(self) -> &'static str {
+        match self {
+            RestoreTool::PgRestore => "pg_restore",
+            RestoreTool::Psql => "psql",
+        }
+    }
+
+    pub fn find_binary(self) -> Option<PathBuf> {
+        match self {
+            RestoreTool::PgRestore => find_pg_restore(),
+            RestoreTool::Psql => find_psql(),
+        }
+    }
+
+    /// Safety dumps use the same format as the restore so both can be
+    /// replayed with the same tooling.
+    pub fn safety_dump_format(self) -> DumpFormat {
+        match self {
+            RestoreTool::PgRestore => DumpFormat::Custom,
+            RestoreTool::Psql => DumpFormat::Plain,
+        }
+    }
+}
+
+/// Picks the restore tool purely from the file extension (.sql = psql).
+pub fn restore_tool_for(path: &Path) -> RestoreTool {
+    match DumpFormat::from_path(path) {
+        DumpFormat::Plain => RestoreTool::Psql,
+        DumpFormat::Custom => RestoreTool::PgRestore,
+    }
+}
+
+/// Pure argument builder for `pg_restore`. The password travels via the
+/// PGPASSWORD environment variable, never argv.
+pub fn build_pg_restore_args(
+    bin: &str,
+    host: &str,
+    port: u16,
+    user: &str,
+    dbname: &str,
+    file: &Path,
+) -> Vec<String> {
+    [
+        bin.to_string(),
+        "--host".to_string(),
+        host.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--username".to_string(),
+        user.to_string(),
+        // Drop existing objects so the backup fully replaces the schema/data.
+        "--clean".to_string(),
+        "--if-exists".to_string(),
+        "--no-owner".to_string(),
+        "--no-privileges".to_string(),
+        // Fail loudly instead of leaving a half-restored database behind.
+        "--exit-on-error".to_string(),
+        "--dbname".to_string(),
+        dbname.to_string(),
+        file.display().to_string(),
+    ]
+    .to_vec()
+}
+
+/// Pure argument builder for replaying plain SQL via `psql`.
+pub fn build_psql_args(
+    bin: &str,
+    host: &str,
+    port: u16,
+    user: &str,
+    dbname: &str,
+    file: &Path,
+) -> Vec<String> {
+    [
+        bin.to_string(),
+        "--host".to_string(),
+        host.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--username".to_string(),
+        user.to_string(),
+        "--dbname".to_string(),
+        dbname.to_string(),
+        "--set".to_string(),
+        "ON_ERROR_STOP=1".to_string(),
+        "--file".to_string(),
+        file.display().to_string(),
+    ]
+    .to_vec()
+}
+
+pub fn build_restore_args(tool: RestoreTool, bin: &str, target: &RestoreTarget) -> Vec<String> {
+    match tool {
+        RestoreTool::PgRestore => build_pg_restore_args(
+            bin,
+            &target.host,
+            target.port,
+            &target.user,
+            &target.dbname,
+            &target.file,
+        ),
+        RestoreTool::Psql => build_psql_args(
+            bin,
+            &target.host,
+            target.port,
+            &target.user,
+            &target.dbname,
+            &target.file,
+        ),
+    }
+}
+
+/// Where a restore writes to: everything needed to dial the database.
+#[derive(Debug, Clone)]
+pub struct RestoreTarget {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub dbname: String,
+    pub file: PathBuf,
+}
+
+/// Path of the mandatory safety dump taken before a restore. Written next to
+/// the backup being restored as `<stem>.pre-restore-<timestamp>.<ext>` so it
+/// is easy to find and never silently overwrites another file (the caller
+/// must refuse to proceed if the path already exists).
+pub fn safety_backup_path(backup_file: &Path) -> Result<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let stem = backup_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("backup");
+    let ext = restore_tool_for(backup_file)
+        .safety_dump_format()
+        .default_extension();
+    let dir = backup_file.parent().unwrap_or_else(|| Path::new("."));
+    Ok(dir.join(format!("{stem}.pre-restore-{stamp}.{ext}")))
+}
+
+/// Newest `.dump`/`.sql` file in `dir`, skipping pre-restore safety backups;
+/// used to pre-fill the TUI restore path field.
+pub fn latest_db_backup_in(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.contains(".pre-restore-") {
+            continue;
+        }
+        let is_backup = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("dump") | Some("sql")
+        );
+        if !is_backup {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+            best = Some((modified, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// Convenience wrapper scanning the default downloads directory.
+pub fn latest_db_backup_file() -> Option<PathBuf> {
+    latest_db_backup_in(&crate::backup::download_dir().ok()?)
+}
+
+/// Restores `backup_file` into `proj`'s database. For SSH projects an SSH
+/// tunnel is established first and torn down on return. The child pid is
+/// published through `pid_sink` right after spawn so the caller can cancel.
+///
+/// Callers MUST take a safety dump first ([`run_dump`] with
+/// [`RestoreTool::safety_dump_format`]) - this function alone destroys data.
+pub fn run_restore(
+    proj: &ProjectConfig,
+    backup_file: &Path,
+    pid_sink: Arc<Mutex<Option<u32>>>,
+    log_line: LogFn,
+) -> Result<SshTunnelGuard> {
+    let tool = restore_tool_for(backup_file);
+    let bin = tool.find_binary().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} not found on PATH or in known install locations. \
+             Install the PostgreSQL client tools (e.g. brew install libpq, \
+             apt install postgresql-client, pacman -S postgresql-libs).",
+            tool.binary_name()
+        )
+    })?;
+    if !backup_file.is_file() {
+        bail!("Backup file not found: {}", backup_file.display());
+    }
+    if proj.db_name.trim().is_empty() {
+        bail!("Project has no database name configured");
+    }
+    let password = proj.get_password().unwrap_or_default();
+
+    match proj.connection_type {
+        ConnectionType::Ssh => {
+            let tunnel = establish_tunnel(&proj.ssh_connection, &proj.db_port)?;
+            let guard = SshTunnelGuard(Some(tunnel));
+            let args = build_restore_args(
+                tool,
+                bin.to_string_lossy().as_ref(),
+                &RestoreTarget {
+                    host: "127.0.0.1".into(),
+                    port: guard.port(),
+                    user: proj.db_user.clone(),
+                    dbname: proj.db_name.clone(),
+                    file: backup_file.to_path_buf(),
+                },
+            );
+            spawn_and_wait(args, &password, &pid_sink, &log_line)?;
+            Ok(guard)
+        }
+        ConnectionType::Url | ConnectionType::Local => {
+            let (host, port) = direct_target(proj);
+            let args = build_restore_args(
+                tool,
+                bin.to_string_lossy().as_ref(),
+                &RestoreTarget {
+                    host,
+                    port,
+                    user: proj.db_user.clone(),
+                    dbname: proj.db_name.clone(),
+                    file: backup_file.to_path_buf(),
+                },
+            );
+            spawn_and_wait(args, &password, &pid_sink, &log_line)?;
+            Ok(SshTunnelGuard(None))
+        }
+    }
+}
+
 fn direct_target(proj: &ProjectConfig) -> (String, u16) {
     crate::check::direct_target(proj)
 }
@@ -240,10 +516,9 @@ fn direct_target(proj: &ProjectConfig) -> (String, u16) {
 fn spawn_and_wait(
     args: Vec<String>,
     password: &str,
-    out: &Path,
     pid_sink: &Arc<Mutex<Option<u32>>>,
     log_line: &LogFn,
-) -> Result<u64> {
+) -> Result<()> {
     let mut child: Child = Command::new(&args[0])
         .args(&args[1..])
         .env("PGPASSWORD", password)
@@ -251,13 +526,13 @@ fn spawn_and_wait(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .context("Failed to spawn pg_dump")?;
+        .with_context(|| format!("Failed to spawn {}", args[0]))?;
 
     if let Ok(mut slot) = pid_sink.lock() {
         *slot = Some(child.id());
     }
 
-    // Drain stderr concurrently so the pipe never back-pressures pg_dump.
+    // Drain stderr concurrently so the pipe never back-pressures the child.
     if let Some(stderr) = child.stderr.take() {
         let redact = password.to_string();
         let log_line = log_line.clone();
@@ -272,15 +547,11 @@ fn spawn_and_wait(
         });
     }
 
-    let status = child.wait().context("pg_dump wait failed")?;
+    let status = child.wait().context("child process wait failed")?;
     if !status.success() {
-        bail!("pg_dump exited with {status} - see Process tab output");
+        bail!("{} exited with {status}", args[0]);
     }
-    let size = fs::metadata(out).map(|m| m.len()).unwrap_or(0);
-    if size == 0 {
-        bail!("pg_dump produced an empty file");
-    }
-    Ok(size)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -343,6 +614,138 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(2048), "2.0 KiB");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MiB");
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn pg_restore_args_clean_and_fail_fast() {
+        let args = build_pg_restore_args(
+            "pg_restore",
+            "127.0.0.1",
+            5433,
+            "alice",
+            "app",
+            Path::new("/tmp/x.dump"),
+        );
+        let expected = [
+            "pg_restore",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "5433",
+            "--username",
+            "alice",
+            "--clean",
+            "--if-exists",
+            "--no-owner",
+            "--no-privileges",
+            "--exit-on-error",
+            "--dbname",
+            "app",
+            "/tmp/x.dump",
+        ];
+        assert_eq!(
+            args,
+            expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn psql_args_stop_on_error() {
+        let args = build_psql_args(
+            "psql",
+            "localhost",
+            5432,
+            "bob",
+            "mydb",
+            Path::new("/tmp/x.sql"),
+        );
+        let expected = [
+            "psql",
+            "--host",
+            "localhost",
+            "--port",
+            "5432",
+            "--username",
+            "bob",
+            "--dbname",
+            "mydb",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "--file",
+            "/tmp/x.sql",
+        ];
+        assert_eq!(
+            args,
+            expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn restore_tool_follows_extension() {
+        assert_eq!(
+            restore_tool_for(Path::new("/tmp/a.dump")),
+            RestoreTool::PgRestore
+        );
+        assert_eq!(restore_tool_for(Path::new("/tmp/a.sql")), RestoreTool::Psql);
+        assert_eq!(
+            restore_tool_for(Path::new("/tmp/a")),
+            RestoreTool::PgRestore
+        );
+        // Safety dumps are always replayable with the same tool.
+        for tool in [RestoreTool::PgRestore, RestoreTool::Psql] {
+            let fmt = tool.safety_dump_format();
+            assert_eq!(
+                restore_tool_for(Path::new(&format!("x.{}", fmt.default_extension()))),
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn safety_path_sits_next_to_backup_with_timestamp() {
+        let path = safety_backup_path(Path::new("/backups/app.dump")).unwrap();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(path.parent().unwrap() == Path::new("/backups"));
+        assert!(name.starts_with("app.pre-restore-"), "{name}");
+        assert!(name.ends_with(".dump"), "{name}");
+
+        let sql = safety_backup_path(Path::new("/backups/app.sql")).unwrap();
+        assert!(sql.file_name().unwrap().to_str().unwrap().ends_with(".sql"));
+    }
+
+    #[test]
+    fn latest_backup_picks_newest_and_skips_safety_files() {
+        let dir = std::env::temp_dir().join(format!("pgs-latest-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.dump");
+        let new = dir.join("new.dump");
+        let safety = dir.join("new.pre-restore-20300101-000000.dump");
+        let noise = dir.join("notes.txt");
+        fs::write(&old, b"o").unwrap();
+        fs::write(&new, b"n").unwrap();
+        fs::write(&safety, b"s").unwrap();
+        fs::write(&noise, b"x").unwrap();
+
+        let file_times = [
+            (&old, 1_000_000_000),
+            (&new, 2_000_000_000),
+            (&safety, 3_000_000_000),
+            (&noise, 4_000_000_000),
+        ];
+        for (path, secs) in file_times {
+            use std::fs::FileTimes;
+            let f = fs::File::options().append(true).open(path).unwrap();
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            f.set_times(FileTimes::new().set_modified(t)).unwrap();
+        }
+
+        assert_eq!(latest_db_backup_in(&dir), Some(new));
+        let _ = fs::remove_dir_all(dir);
     }
 }
 
