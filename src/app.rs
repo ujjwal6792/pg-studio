@@ -1,5 +1,5 @@
 use crate::check;
-use crate::config::{AppConfig, ConnectionType, ProjectBundle, ProjectConfig};
+use crate::config::{AppConfig, ConnectionType, Engine, ProjectBundle, ProjectConfig};
 use crate::dbbackup::{self, DumpFormat, Job, JobStatus};
 use crate::drizzle::{check_dependencies, extract_tunnel_url, prepare_workspace, spawn_studio};
 use crate::open::{copy_to_clipboard, open_url};
@@ -230,6 +230,7 @@ pub fn help_entries() -> Vec<HelpEntry> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormField {
     Name,
+    Engine,
     ConnectionType,
     SshConnection,
     DbUrl,
@@ -238,13 +239,39 @@ pub enum FormField {
     DbName,
     DbUser,
     DbPass,
+    DbPath,
+    CfAccountId,
+    CfDatabaseId,
 }
 
 impl FormField {
-    fn order(ct: ConnectionType) -> &'static [FormField] {
+    /// Field navigation order for the form, driven by the selected engine
+    /// (and, for wire engines, by the connection type).
+    fn order(engine: Engine, ct: ConnectionType) -> &'static [FormField] {
+        match engine {
+            Engine::Sqlite => &[FormField::Name, FormField::Engine, FormField::DbPath],
+            Engine::D1 => &[
+                FormField::Name,
+                FormField::Engine,
+                FormField::CfAccountId,
+                FormField::CfDatabaseId,
+                FormField::DbPass,
+            ],
+            Engine::Turso => &[
+                FormField::Name,
+                FormField::Engine,
+                FormField::DbUrl,
+                FormField::DbPass,
+            ],
+            Engine::Postgres | Engine::Mysql => Self::wire_order(ct),
+        }
+    }
+
+    fn wire_order(ct: ConnectionType) -> &'static [FormField] {
         match ct {
             ConnectionType::Ssh => &[
                 FormField::Name,
+                FormField::Engine,
                 FormField::ConnectionType,
                 FormField::SshConnection,
                 FormField::DbPort,
@@ -254,6 +281,7 @@ impl FormField {
             ],
             ConnectionType::Url => &[
                 FormField::Name,
+                FormField::Engine,
                 FormField::ConnectionType,
                 FormField::DbUrl,
                 FormField::DbHost,
@@ -264,6 +292,7 @@ impl FormField {
             ],
             ConnectionType::Local => &[
                 FormField::Name,
+                FormField::Engine,
                 FormField::ConnectionType,
                 FormField::DbHost,
                 FormField::DbPort,
@@ -274,14 +303,14 @@ impl FormField {
         }
     }
 
-    pub fn next(&self, ct: ConnectionType) -> Self {
-        let order = Self::order(ct);
+    pub fn next(&self, engine: Engine, ct: ConnectionType) -> Self {
+        let order = Self::order(engine, ct);
         let idx = order.iter().position(|f| f == self).unwrap_or(0);
         order[(idx + 1) % order.len()]
     }
 
-    pub fn prev(&self, ct: ConnectionType) -> Self {
-        let order = Self::order(ct);
+    pub fn prev(&self, engine: Engine, ct: ConnectionType) -> Self {
+        let order = Self::order(engine, ct);
         let idx = order.iter().position(|f| f == self).unwrap_or(0);
         order[(idx + order.len() - 1) % order.len()]
     }
@@ -292,37 +321,53 @@ impl FormField {
                 "Unique identifier for this project. If left blank, defaults to database_name@host.",
                 "Examples: production-us-east, staging-db, app_db@ubuntu@192.168.1.5",
             ),
+            FormField::Engine => (
+                "Which database engine this project talks to. Each engine has its own fields; secrets always go to your keychain.",
+                "Press Enter or Space to cycle PostgreSQL -> SQLite -> Cloudflare D1 -> Turso -> MySQL.",
+            ),
             FormField::ConnectionType => (
                 "How to reach the database: SSH tunnels through a remote server, URL connects directly, Local talks to a database on this machine.",
                 "Press Enter or Space to cycle SSH -> URL -> Local. Choosing Local auto-fills the host with localhost.",
             ),
             FormField::SshConnection => (
-                "SSH connection string to reach the remote server hosting the Postgres database.",
+                "SSH connection string to reach the remote server hosting the database.",
                 "Examples: ubuntu@13.233.0.0, root@ec2.compute.amazonaws.com, admin@my-server.com",
             ),
             FormField::DbUrl => (
-                "Full public connection string for a hosted database (PlanetScale, CockroachDB, etc.).",
-                "Examples: postgresql://user:pass@host:5432/db — password is moved to your keychain on save.",
+                "Full public connection string: postgresql://... for Postgres, mysql://... for MySQL, libsql://... for Turso.",
+                "Examples: libsql://acme.turso.io - embedded passwords are moved to your keychain on save.",
             ),
             FormField::DbHost => (
                 "Host for a direct or local connection (used only if no full Connection URL is provided).",
-                "Examples: localhost (locally running Postgres), 127.0.0.1, db.your-cluster.us-east-1.cockroachlabs.cloud",
+                "Examples: localhost (locally running database), 127.0.0.1, db.your-cluster.us-east-1.cockroachlabs.cloud",
             ),
             FormField::DbPort => (
-                "The remote port Postgres is listening on. Leave blank to default to 5432.",
-                "Examples: 5432, 5433, 6432, 26257",
+                "The remote port the database is listening on. Leave blank to default to 5432 (Postgres) or 3306 (MySQL).",
+                "Examples: 5432, 5433, 3306, 6432, 26257",
             ),
             FormField::DbName => (
-                "Name of the target Postgres database.",
+                "Name of the target database.",
                 "Examples: postgres, production_main, app_db_v2, defaultdb",
             ),
             FormField::DbUser => (
-                "Postgres database user with read/introspection permissions.",
-                "Examples: postgres, db_admin, readonly_user",
+                "Database user with read/introspection permissions.",
+                "Examples: postgres, db_admin, readonly_user, root",
             ),
             FormField::DbPass => (
-                "Postgres user password. Securely saved in your OS Keychain (only fetched when launching).",
+                "Secret for the selected engine: user password (Postgres/MySQL/SSH), Cloudflare API token (D1) or Turso auth token. Securely saved in your OS Keychain (only fetched when launching).",
                 "Input is masked with asterisks (*)",
+            ),
+            FormField::DbPath => (
+                "Path of the local SQLite database file. Tilde (~) expands to your home directory; a wrangler dev D1 file works too (.wrangler/state/v3/d1/**).",
+                "Examples: ~/data/app.db, ./local.sqlite3, myproject/.wrangler/state/v3/d1/miniflare-D1DatabaseObject/<hash>.sqlite",
+            ),
+            FormField::CfAccountId => (
+                "Cloudflare account ID that owns the D1 database (found on any account page in the dashboard).",
+                "Example: 023e105f4ecef8ad9ca31a8372d0c353",
+            ),
+            FormField::CfDatabaseId => (
+                "D1 database ID (Dashboard > Storage & Databases > D1 > your database).",
+                "Example: 54f4e105-2f3c-4a5d-8b6e-1c2d3e4f5a6b",
             ),
         }
     }
@@ -379,6 +424,10 @@ pub struct App {
     pub input_dbname: Input,
     pub input_dbuser: Input,
     pub input_dbpass: Input,
+    pub input_dbpath: Input,
+    pub input_cf_account: Input,
+    pub input_cf_database: Input,
+    pub engine: Engine,
     pub connection_type: ConnectionType,
     pub active_field: FormField,
 
@@ -452,6 +501,10 @@ impl App {
             input_dbname: Input::default(),
             input_dbuser: Input::default(),
             input_dbpass: Input::default(),
+            input_dbpath: Input::default(),
+            input_cf_account: Input::default(),
+            input_cf_database: Input::default(),
+            engine: Engine::Postgres,
             connection_type: ConnectionType::Ssh,
             active_field: FormField::Name,
 
@@ -492,7 +545,10 @@ impl App {
             FormField::DbName => Some(&self.input_dbname),
             FormField::DbUser => Some(&self.input_dbuser),
             FormField::DbPass => Some(&self.input_dbpass),
-            FormField::ConnectionType => None,
+            FormField::DbPath => Some(&self.input_dbpath),
+            FormField::CfAccountId => Some(&self.input_cf_account),
+            FormField::CfDatabaseId => Some(&self.input_cf_database),
+            FormField::Engine | FormField::ConnectionType => None,
         }
     }
 
@@ -507,7 +563,10 @@ impl App {
             FormField::DbName => Some(&mut self.input_dbname),
             FormField::DbUser => Some(&mut self.input_dbuser),
             FormField::DbPass => Some(&mut self.input_dbpass),
-            FormField::ConnectionType => None,
+            FormField::DbPath => Some(&mut self.input_dbpath),
+            FormField::CfAccountId => Some(&mut self.input_cf_account),
+            FormField::CfDatabaseId => Some(&mut self.input_cf_database),
+            FormField::Engine | FormField::ConnectionType => None,
         }
     }
 
@@ -536,11 +595,13 @@ impl App {
         self.error_message = None;
         if let Some(proj) = self.config.projects.get(self.selected_project_idx) {
             self.input_name = Input::from(proj.name.clone());
+            self.engine = proj.engine;
             self.connection_type = proj.connection_type;
             self.input_ssh = Input::from(proj.ssh_connection.clone());
             self.input_url = Input::from(proj.db_url.clone());
             self.input_host = Input::from(proj.db_host.clone());
-            self.input_port = if proj.db_port == "5432" {
+            let default_port = proj.engine.default_port().to_string();
+            self.input_port = if proj.db_port == default_port {
                 Input::default()
             } else {
                 Input::from(proj.db_port.clone())
@@ -548,6 +609,9 @@ impl App {
             self.input_dbname = Input::from(proj.db_name.clone());
             self.input_dbuser = Input::from(proj.db_user.clone());
             self.input_dbpass = Input::default(); // DO NOT query keychain here!
+            self.input_dbpath = Input::from(proj.db_path.clone());
+            self.input_cf_account = Input::from(proj.cf_account_id.clone());
+            self.input_cf_database = Input::from(proj.cf_database_id.clone());
             self.is_new_project = false;
         } else {
             self.reset_form();
@@ -583,11 +647,13 @@ impl App {
         }
 
         self.input_name = Input::from(name);
+        self.engine = src.engine;
         self.connection_type = src.connection_type;
         self.input_ssh = Input::from(src.ssh_connection.clone());
         self.input_url = Input::from(src.db_url.clone());
         self.input_host = Input::from(src.db_host.clone());
-        self.input_port = if src.db_port == "5432" {
+        let default_port = src.engine.default_port().to_string();
+        self.input_port = if src.db_port == default_port {
             Input::default()
         } else {
             Input::from(src.db_port.clone())
@@ -598,6 +664,9 @@ impl App {
             Ok(pass) => Input::from(pass),
             Err(_) => Input::default(),
         };
+        self.input_dbpath = Input::from(src.db_path.clone());
+        self.input_cf_account = Input::from(src.cf_account_id.clone());
+        self.input_cf_database = Input::from(src.cf_database_id.clone());
         self.error_message = None;
         self.is_new_project = true;
 
@@ -620,6 +689,14 @@ impl App {
         self.active_field = FormField::ConnectionType;
     }
 
+    pub fn toggle_engine(&mut self) {
+        self.engine = self.engine.next();
+        // Reset navigation to a field that exists in every engine layout.
+        if !FormField::order(self.engine, self.connection_type).contains(&self.active_field) {
+            self.active_field = FormField::Engine;
+        }
+    }
+
     pub fn reset_form(&mut self) {
         self.error_message = None;
         self.input_name = Input::default();
@@ -630,67 +707,42 @@ impl App {
         self.input_dbname = Input::default();
         self.input_dbuser = Input::default();
         self.input_dbpass = Input::default();
+        self.input_dbpath = Input::default();
+        self.input_cf_account = Input::default();
+        self.input_cf_database = Input::default();
+        self.engine = Engine::Postgres;
         self.connection_type = ConnectionType::Ssh;
         self.active_field = FormField::Name;
         self.is_new_project = true;
     }
 
     pub fn save_form_to_project(&mut self) -> Result<()> {
-        let ssh = self.input_ssh.value().to_string();
-        let db_url_input = self.input_url.value().trim().to_string();
-        let db_host = self.input_host.value().trim().to_string();
-        let port = self.input_port.value().to_string();
-        let dbname = self.input_dbname.value().to_string();
-        let dbuser = self.input_dbuser.value().to_string();
-        let dbpass = self.input_dbpass.value().to_string();
+        let engine = self.engine;
 
-        let final_port = if port.trim().is_empty() {
-            "5432".to_string()
-        } else {
-            port.trim().to_string()
+        let (mut proj, secret) = match engine {
+            Engine::Postgres | Engine::Mysql => self.build_wire_project(engine)?,
+            Engine::Sqlite => self.build_sqlite_project()?,
+            Engine::D1 => self.build_d1_project()?,
+            Engine::Turso => self.build_turso_project()?,
         };
 
-        let mut name = self.input_name.value().trim().to_string();
-        if name.is_empty() {
-            name =
-                ProjectConfig::derive_default_name(self.connection_type, &ssh, &db_host, &dbname);
+        if proj.name.is_empty() {
+            proj.name = proj.derived_name();
         }
+        let name = proj.name.clone();
 
         let existing_match = self.config.projects.iter().position(|p| p.name == name);
         if let Some(matching_idx) = existing_match
             && (self.is_new_project || matching_idx != self.selected_project_idx)
         {
-            self.error_message = Some(format!("A project named '{}' already exists!", name));
+            self.error_message = Some(format!("A project named '{name}' already exists!"));
             return Err(anyhow!("Project name must be unique"));
         }
 
-        // In URL mode, pull any embedded password out of the URL into the keychain.
-        let (db_url, extracted_pass) =
-            if self.connection_type == ConnectionType::Url && !db_url_input.is_empty() {
-                let (redacted, pass) = ProjectConfig::redact_url_password(&db_url_input);
-                (redacted, pass)
-            } else {
-                (db_url_input, None)
-            };
-
-        let proj = ProjectConfig {
-            name: name.clone(),
-            connection_type: self.connection_type,
-            ssh_connection: ssh,
-            db_url,
-            db_host,
-            db_port: final_port,
-            db_name: dbname,
-            db_user: dbuser,
-            last_opened: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
-        };
-
-        let pass_to_save = extracted_pass.unwrap_or(dbpass);
-        if !pass_to_save.is_empty() {
-            proj.save_password(&pass_to_save)?;
+        if let Some(secret) = secret
+            && !secret.is_empty()
+        {
+            proj.save_password(&secret)?;
         }
 
         if self.is_new_project {
@@ -702,9 +754,149 @@ impl App {
 
         self.config.save()?;
         self.load_selected_into_form();
-        self.status_message = format!("Project '{}' saved successfully!", name);
+        self.status_message = format!("Project '{name}' saved successfully!");
         self.error_message = None;
         Ok(())
+    }
+
+    fn now_timestamp() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+
+    /// Postgres/MySQL projects: full transport flexibility (SSH/URL/Local).
+    fn build_wire_project(&self, engine: Engine) -> Result<(ProjectConfig, Option<String>)> {
+        let ssh = self.input_ssh.value().to_string();
+        let db_url_input = self.input_url.value().trim().to_string();
+        let db_host = self.input_host.value().trim().to_string();
+        let port = self.input_port.value().to_string();
+        let dbname = self.input_dbname.value().trim().to_string();
+        let dbuser = self.input_dbuser.value().trim().to_string();
+        let dbpass = self.input_dbpass.value().to_string();
+
+        match self.connection_type {
+            ConnectionType::Ssh if ssh.trim().is_empty() => {
+                return Err(anyhow!("SSH connection string is empty"));
+            }
+            ConnectionType::Url if db_url_input.is_empty() && db_host.is_empty() => {
+                return Err(anyhow!("Provide a connection URL or a database host"));
+            }
+            _ => {}
+        }
+
+        let final_port = if port.trim().is_empty() {
+            engine.default_port().to_string()
+        } else {
+            port.trim().to_string()
+        };
+
+        // In URL mode, pull any embedded password out of the URL into the keychain.
+        let (db_url, extracted_pass) =
+            if self.connection_type == ConnectionType::Url && !db_url_input.is_empty() {
+                ProjectConfig::redact_url_password(&db_url_input)
+            } else {
+                (db_url_input, None)
+            };
+
+        Ok((
+            ProjectConfig {
+                name: self.input_name.value().trim().to_string(),
+                engine,
+                connection_type: self.connection_type,
+                ssh_connection: ssh,
+                db_url,
+                db_host,
+                db_port: final_port,
+                db_name: dbname,
+                db_user: dbuser,
+                db_path: String::new(),
+                cf_account_id: String::new(),
+                cf_database_id: String::new(),
+                last_opened: Self::now_timestamp(),
+            },
+            Some(extracted_pass.unwrap_or(dbpass)),
+        ))
+    }
+
+    /// Local SQLite file: the path is the whole story.
+    fn build_sqlite_project(&self) -> Result<(ProjectConfig, Option<String>)> {
+        let db_path = self.input_dbpath.value().trim().to_string();
+        anyhow::ensure!(!db_path.is_empty(), "SQLite database file path is empty");
+
+        Ok((
+            ProjectConfig {
+                name: self.input_name.value().trim().to_string(),
+                engine: Engine::Sqlite,
+                connection_type: ConnectionType::Local,
+                ssh_connection: String::new(),
+                db_url: String::new(),
+                db_host: String::new(),
+                db_port: String::new(),
+                db_name: String::new(),
+                db_user: String::new(),
+                db_path,
+                cf_account_id: String::new(),
+                cf_database_id: String::new(),
+                last_opened: Self::now_timestamp(),
+            },
+            None,
+        ))
+    }
+
+    /// Remote Cloudflare D1 over d1-http; the API token lives in the keychain.
+    fn build_d1_project(&self) -> Result<(ProjectConfig, Option<String>)> {
+        let account_id = self.input_cf_account.value().trim().to_string();
+        let database_id = self.input_cf_database.value().trim().to_string();
+        anyhow::ensure!(!account_id.is_empty(), "Cloudflare account ID is empty");
+        anyhow::ensure!(!database_id.is_empty(), "Cloudflare database ID is empty");
+        let token = self.input_dbpass.value().to_string();
+
+        Ok((
+            ProjectConfig {
+                name: self.input_name.value().trim().to_string(),
+                engine: Engine::D1,
+                connection_type: ConnectionType::Url,
+                ssh_connection: String::new(),
+                db_url: String::new(),
+                db_host: String::new(),
+                db_port: String::new(),
+                db_name: String::new(),
+                db_user: String::new(),
+                db_path: String::new(),
+                cf_account_id: account_id,
+                cf_database_id: database_id,
+                last_opened: Self::now_timestamp(),
+            },
+            Some(token),
+        ))
+    }
+
+    /// Turso (libsql) remote database; auth token lives in the keychain.
+    fn build_turso_project(&self) -> Result<(ProjectConfig, Option<String>)> {
+        let db_url = self.input_url.value().trim().to_string();
+        anyhow::ensure!(!db_url.is_empty(), "Turso database URL is empty");
+        let token = self.input_dbpass.value().to_string();
+
+        Ok((
+            ProjectConfig {
+                name: self.input_name.value().trim().to_string(),
+                engine: Engine::Turso,
+                connection_type: ConnectionType::Url,
+                ssh_connection: String::new(),
+                db_url,
+                db_host: String::new(),
+                db_port: String::new(),
+                db_name: String::new(),
+                db_user: String::new(),
+                db_path: String::new(),
+                cf_account_id: String::new(),
+                cf_database_id: String::new(),
+                last_opened: Self::now_timestamp(),
+            },
+            Some(token),
+        ))
     }
 
     /// Writes all project definitions (password-free) to the export bundle.
@@ -857,6 +1049,13 @@ impl App {
                     self.add_log("Dump aborted: no project selected.".to_string());
                     return;
                 }
+                if !self.selected_project_is_postgres() {
+                    self.add_log(
+                        "Dump aborted: backups are only supported for PostgreSQL projects."
+                            .to_string(),
+                    );
+                    return;
+                }
                 if dbbackup::find_pg_dump().is_none() {
                     self.offer_pg_tool_install();
                     return;
@@ -869,6 +1068,13 @@ impl App {
             3 => {
                 if self.config.projects.is_empty() {
                     self.add_log("Restore aborted: no project selected.".to_string());
+                    return;
+                }
+                if !self.selected_project_is_postgres() {
+                    self.add_log(
+                        "Restore aborted: backups are only supported for PostgreSQL projects."
+                            .to_string(),
+                    );
                     return;
                 }
                 if !path.is_file() {
@@ -904,6 +1110,15 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// pg_dump/pg_restore/psql only speak Postgres; gate the backup menu.
+    fn selected_project_is_postgres(&self) -> bool {
+        self.config
+            .projects
+            .get(self.selected_project_idx)
+            .map(|p| p.engine == Engine::Postgres)
+            .unwrap_or(false)
     }
 
     /// Offers the guided package-manager install when pg tools are missing.
@@ -1335,13 +1550,41 @@ impl App {
 
     // --- Launch flow ---
 
-    /// Smart paste: recognises a complete `postgresql://...` URL and fills
-    /// every form field from it. Returns `true` when the paste was consumed;
+    /// Smart paste: recognises a complete `postgresql://...` URL, a
+    /// `libsql://...` Turso URL, or an existing local SQLite file path, and
+    /// fills the form accordingly. Returns `true` when the paste was consumed;
     /// otherwise the caller should insert the text into the active field.
     pub fn apply_pasted_text(&mut self, text: &str) -> bool {
         if self.mode != AppMode::EditingForm {
             return false;
         }
+        let trimmed = text.trim();
+
+        // Turso/libsql URL -> switch engine and fill the URL field.
+        if trimmed.starts_with("libsql://") {
+            self.engine = Engine::Turso;
+            self.input_url = Input::from(trimmed.to_string());
+            self.active_field = FormField::DbUrl;
+            self.error_message = None;
+            self.status_message =
+                "Detected a Turso database URL - add your auth token to save.".to_string();
+            return true;
+        }
+
+        // Existing local SQLite file path -> switch engine and fill the path.
+        let looks_like_sqlite_path = !trimmed.contains("://")
+            && (trimmed.ends_with(".db")
+                || trimmed.ends_with(".sqlite")
+                || trimmed.ends_with(".sqlite3"));
+        if looks_like_sqlite_path && std::path::Path::new(trimmed).is_file() {
+            self.engine = Engine::Sqlite;
+            self.input_dbpath = Input::from(trimmed.to_string());
+            self.active_field = FormField::DbPath;
+            self.error_message = None;
+            self.status_message = "Detected a local SQLite database file.".to_string();
+            return true;
+        }
+
         let Some(parsed) = check::parse_full_pg_url(text) else {
             return false;
         };
@@ -1764,8 +2007,13 @@ fn run_session(
 
     let studio_port = session.lock().map(|s| s.studio_port).unwrap_or(4983);
 
-    let db_url = match proj.connection_type {
-        ConnectionType::Ssh => match establish_tunnel(&proj.ssh_connection, &proj.db_port) {
+    // Only wire engines travel over TCP; file/API-backed engines need no
+    // tunnel even when a stray SSH connection type is stored.
+    let tunnel_needed = matches!(proj.engine, Engine::Postgres | Engine::Mysql)
+        && proj.connection_type == ConnectionType::Ssh;
+
+    let target = if tunnel_needed {
+        match establish_tunnel(&proj.ssh_connection, &proj.db_port) {
             Ok(tunnel) => {
                 let local_port = tunnel.local_port;
                 if let Ok(mut s) = session.lock() {
@@ -1776,11 +2024,7 @@ fn run_session(
                     &session,
                     format!("SSH tunnel established on local port {}", local_port),
                 );
-                let pass = proj.get_password().unwrap_or_default();
-                format!(
-                    "postgresql://{}:{}@127.0.0.1:{}/{}",
-                    proj.db_user, pass, local_port, proj.db_name
-                )
+                proj.resolve_target(Some(local_port))
             }
             Err(e) => {
                 push_session_log(&session, format!("SSH Tunnel error: {:#}", e));
@@ -1788,16 +2032,19 @@ fn run_session(
                 add_global_log(&global_logs, format!("Project '{}' failed to start.", name));
                 return;
             }
-        },
-        ConnectionType::Url | ConnectionType::Local => match proj.connection_url(None) {
-            Ok(url) => url,
-            Err(e) => {
-                push_session_log(&session, format!("Connection error: {:#}", e));
-                set_session_error(&session, format!("{:#}", e));
-                add_global_log(&global_logs, format!("Project '{}' failed to start.", name));
-                return;
-            }
-        },
+        }
+    } else {
+        proj.resolve_target(None)
+    };
+
+    let target = match target {
+        Ok(t) => t,
+        Err(e) => {
+            push_session_log(&session, format!("Connection error: {:#}", e));
+            set_session_error(&session, format!("{:#}", e));
+            add_global_log(&global_logs, format!("Project '{}' failed to start.", name));
+            return;
+        }
     };
 
     if let Ok(mut s) = session.lock() {
@@ -1808,7 +2055,7 @@ fn run_session(
         .lock()
         .map(|s| s.logs.clone())
         .unwrap_or_else(|_| Arc::new(Mutex::new(Vec::new())));
-    let workspace = match prepare_workspace(&proj.name, &db_url, &session_logs) {
+    let workspace = match prepare_workspace(&proj.name, &target, &session_logs) {
         Ok(w) => w,
         Err(e) => {
             push_session_log(&session, format!("Workspace error: {:#}", e));
@@ -1823,7 +2070,7 @@ fn run_session(
     }
 
     let log_path = workspace.join("studio.log");
-    let child = match spawn_studio(&workspace, &db_url, studio_port, &log_path) {
+    let child = match spawn_studio(&workspace, &target, studio_port, &log_path) {
         Ok(c) => c,
         Err(e) => {
             push_session_log(&session, format!("Drizzle Studio error: {:#}", e));
@@ -1993,56 +2240,83 @@ mod tests {
 
     #[test]
     fn ssh_field_order_skips_url_only_fields() {
-        let order = FormField::order(ConnectionType::Ssh);
+        let order = FormField::order(Engine::Postgres, ConnectionType::Ssh);
         assert!(!order.contains(&FormField::DbUrl));
         assert!(!order.contains(&FormField::DbHost));
+        assert!(order.contains(&FormField::Engine));
     }
 
     #[test]
     fn url_field_order_includes_url_and_host() {
-        let order = FormField::order(ConnectionType::Url);
+        let order = FormField::order(Engine::Postgres, ConnectionType::Url);
         assert!(order.contains(&FormField::DbUrl));
         assert!(order.contains(&FormField::DbHost));
     }
 
     #[test]
     fn local_field_order_has_no_url_or_ssh() {
-        let order = FormField::order(ConnectionType::Local);
+        let order = FormField::order(Engine::Postgres, ConnectionType::Local);
         assert!(!order.contains(&FormField::DbUrl));
         assert!(!order.contains(&FormField::SshConnection));
         assert!(order.contains(&FormField::DbHost));
     }
 
     #[test]
+    fn nonwire_engine_orders_show_engine_specific_fields() {
+        let sqlite = FormField::order(Engine::Sqlite, ConnectionType::Ssh);
+        assert!(sqlite.contains(&FormField::DbPath));
+        assert!(!sqlite.contains(&FormField::ConnectionType));
+        assert!(!sqlite.contains(&FormField::DbPass));
+
+        let d1 = FormField::order(Engine::D1, ConnectionType::Local);
+        assert!(d1.contains(&FormField::CfAccountId));
+        assert!(d1.contains(&FormField::CfDatabaseId));
+        assert!(d1.contains(&FormField::DbPass));
+        assert!(!d1.contains(&FormField::DbPath));
+
+        let turso = FormField::order(Engine::Turso, ConnectionType::Url);
+        assert!(turso.contains(&FormField::DbUrl));
+        assert!(turso.contains(&FormField::DbPass));
+        assert!(!turso.contains(&FormField::DbName));
+
+        // MySQL shares the wire layouts with Postgres.
+        assert_eq!(
+            FormField::order(Engine::Mysql, ConnectionType::Ssh),
+            FormField::order(Engine::Postgres, ConnectionType::Ssh)
+        );
+    }
+
+    #[test]
     fn next_and_prev_wrap_around_for_every_type() {
-        for ct in [
-            ConnectionType::Ssh,
-            ConnectionType::Url,
-            ConnectionType::Local,
-        ] {
-            let order = FormField::order(ct);
-            let mut f = FormField::Name;
-            for _ in 0..order.len() {
-                f = f.next(ct);
+        for engine in Engine::ALL {
+            for ct in [
+                ConnectionType::Ssh,
+                ConnectionType::Url,
+                ConnectionType::Local,
+            ] {
+                let order = FormField::order(engine, ct);
+                let mut f = FormField::Name;
+                for _ in 0..order.len() {
+                    f = f.next(engine, ct);
+                }
+                assert_eq!(f, FormField::Name);
+                for _ in 0..order.len() {
+                    f = f.prev(engine, ct);
+                }
+                assert_eq!(f, FormField::Name);
             }
-            assert_eq!(f, FormField::Name);
-            for _ in 0..order.len() {
-                f = f.prev(ct);
-            }
-            assert_eq!(f, FormField::Name);
         }
     }
 
     #[test]
     fn next_from_last_field_is_first_field() {
-        let order = FormField::order(ConnectionType::Local);
+        let order = FormField::order(Engine::Postgres, ConnectionType::Local);
         let last = *order.last().unwrap();
-        assert_eq!(last.next(ConnectionType::Local), order[0]);
+        assert_eq!(last.next(Engine::Postgres, ConnectionType::Local), order[0]);
     }
 
-    #[test]
-    fn input_accessors_map_every_editable_field() {
-        let app = App {
+    fn bare_app() -> App {
+        App {
             config: AppConfig::default(),
             selected_project_idx: 0,
             active_pane: ActivePane::ProjectsList,
@@ -2068,6 +2342,10 @@ mod tests {
             input_dbname: Input::from("d"),
             input_dbuser: Input::from("r"),
             input_dbpass: Input::from("*"),
+            input_dbpath: Input::default(),
+            input_cf_account: Input::default(),
+            input_cf_database: Input::default(),
+            engine: Engine::Postgres,
             connection_type: ConnectionType::Local,
             active_field: FormField::Name,
             is_new_project: false,
@@ -2076,9 +2354,86 @@ mod tests {
             logs: Arc::new(Mutex::new(Vec::new())),
             sessions: Vec::new(),
             theme: Theme::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn input_accessors_map_every_editable_field() {
+        let app = bare_app();
         assert_eq!(app.input(FormField::Name).unwrap().value(), "n");
         assert_eq!(app.input(FormField::DbPass).unwrap().value(), "*");
         assert!(app.input(FormField::ConnectionType).is_none());
+        assert!(app.input(FormField::Engine).is_none());
+    }
+
+    #[test]
+    fn toggle_engine_cycles_and_resets_invalid_field() {
+        let mut app = bare_app();
+        app.engine = Engine::Postgres;
+        app.connection_type = ConnectionType::Ssh;
+        app.active_field = FormField::DbPath; // not on the Ssh layout
+
+        app.toggle_engine();
+        assert_eq!(app.engine, Engine::Sqlite);
+        // DbPath exists in the SQLite layout so navigation keeps it.
+        assert_eq!(app.active_field, FormField::DbPath);
+
+        app.toggle_engine(); // -> D1 (no DbPath there)
+        assert_eq!(app.engine, Engine::D1);
+        assert_eq!(app.active_field, FormField::Engine);
+
+        // Full cycle returns to Postgres.
+        while app.engine != Engine::Postgres {
+            app.toggle_engine();
+        }
+        assert_eq!(app.engine, Engine::Postgres);
+    }
+
+    #[test]
+    fn paste_detects_turso_url_and_sqlite_file() {
+        let mut app = bare_app();
+        app.mode = AppMode::EditingForm;
+
+        assert!(app.apply_pasted_text("libsql://acme.turso.io"));
+        assert_eq!(app.engine, Engine::Turso);
+        assert_eq!(app.input_url.value(), "libsql://acme.turso.io");
+
+        let dir = std::env::temp_dir().join(format!("pg-studio-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("paste.db");
+        std::fs::write(&db, b"x").unwrap();
+
+        app.reset_form();
+        app.mode = AppMode::EditingForm;
+        assert!(app.apply_pasted_text(db.to_str().unwrap()));
+        assert_eq!(app.engine, Engine::Sqlite);
+        assert_eq!(app.input_dbpath.value(), db.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Non-matching text falls through untouched.
+        app.reset_form();
+        app.mode = AppMode::EditingForm;
+        assert!(!app.apply_pasted_text("just some text"));
+    }
+
+    #[test]
+    fn build_sqlite_project_zeroes_irrelevant_fields() {
+        let mut app = bare_app();
+        app.is_new_project = true;
+        app.engine = Engine::Sqlite;
+        app.input_name = Input::default();
+        app.input_dbpath = Input::from("/tmp/x.db");
+
+        let (proj, secret) = app.build_sqlite_project().unwrap();
+        assert_eq!(proj.engine, Engine::Sqlite);
+        assert_eq!(proj.db_path, "/tmp/x.db");
+        assert_eq!(proj.derived_name(), "x@sqlite");
+        assert!(secret.is_none());
+        assert_eq!(proj.db_url, "");
+        assert_eq!(proj.cf_account_id, "");
+
+        // Empty path must fail validation.
+        app.input_dbpath = Input::default();
+        assert!(app.build_sqlite_project().is_err());
     }
 }

@@ -1,12 +1,12 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Args, Parser};
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use pg_studio::{
     app::{ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField, HelpAction},
     backup,
-    config::{AppConfig, ConnectionType, ProjectConfig},
+    config::{AppConfig, ConnectionType, Engine, ProjectConfig},
     open::{copy_to_clipboard, open_url},
     theme,
     tui::Tui,
@@ -28,6 +28,9 @@ Projects:
   pg-studio list                     show configured projects and their status
   pg-studio new --type ssh --ssh ubuntu@host -d app -u admin --password-stdin
   pg-studio new --type local -d postgres -u postgres
+  pg-studio new --engine sqlite --file ~/data/app.db
+  pg-studio new --engine d1 --account-id ID --database-id ID --password-stdin
+  pg-studio new --engine turso --url libsql://acme.turso.io --password-stdin
   pg-studio remove my-project        delete (asks to confirm; -y skips)
   pg-studio test my-project          check reachability without launching
 
@@ -37,7 +40,7 @@ Studio:
   pg-studio url my-project           print the running studio URL
   pg-studio stop my-project          stop a studio (\"all\" stops everything)
 
-Backups:
+Backups (PostgreSQL projects only):
   pg-studio backup [FILE]            password-free backup of all projects
   pg-studio restore FILE             import projects from a backup
   pg-studio dump my-project          database dump via pg_dump
@@ -67,6 +70,49 @@ struct Cli {
 
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+/// Arguments for `pg-studio new`.
+#[derive(Args)]
+struct NewArgs {
+    /// Project name (default: derived from database and host)
+    name: Option<String>,
+    /// Database engine: postgres, sqlite, d1, turso or mysql (default postgres)
+    #[arg(long)]
+    engine: Option<String>,
+    /// Connection type: ssh, url, or local (wire engines only)
+    #[arg(long)]
+    r#type: Option<String>,
+    /// SSH connection string (for --type ssh)
+    #[arg(long)]
+    ssh: Option<String>,
+    /// Full connection URL: postgres://..., mysql://... or libsql://...
+    #[arg(long)]
+    url: Option<String>,
+    /// Database host (url/local types; default localhost for local)
+    #[arg(long)]
+    host: Option<String>,
+    /// Database port (default 5432 / 3306)
+    #[arg(long)]
+    port: Option<String>,
+    /// Database name
+    #[arg(short = 'd', long)]
+    db: Option<String>,
+    /// Database user
+    #[arg(short = 'u', long)]
+    user: Option<String>,
+    /// SQLite database file path (for --engine sqlite)
+    #[arg(long)]
+    file: Option<String>,
+    /// Cloudflare account ID (for --engine d1)
+    #[arg(long = "account-id")]
+    account_id: Option<String>,
+    /// D1 database ID (for --engine d1)
+    #[arg(long = "database-id")]
+    database_id: Option<String>,
+    /// Read the password/token from stdin (one line)
+    #[arg(long)]
+    password_stdin: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -115,34 +161,7 @@ enum Commands {
     /// List configured projects.
     List,
     /// Create a project non-interactively.
-    New {
-        /// Project name (default: derived from database and host)
-        name: Option<String>,
-        /// Connection type: ssh, url, or local
-        #[arg(long)]
-        r#type: Option<String>,
-        /// SSH connection string (for --type ssh)
-        #[arg(long)]
-        ssh: Option<String>,
-        /// Full postgres:// URL (for --type url)
-        #[arg(long)]
-        url: Option<String>,
-        /// Database host (url/local types; default localhost for local)
-        #[arg(long)]
-        host: Option<String>,
-        /// Database port (default 5432)
-        #[arg(long)]
-        port: Option<String>,
-        /// Database name
-        #[arg(short = 'd', long)]
-        db: Option<String>,
-        /// Database user
-        #[arg(short = 'u', long)]
-        user: Option<String>,
-        /// Read the password from stdin (one line)
-        #[arg(long)]
-        password_stdin: bool,
-    },
+    New(Box<NewArgs>),
     /// Delete a project from the config.
     Remove {
         /// Project name
@@ -305,18 +324,37 @@ fn run_command(command: Commands) -> Result<()> {
             run_restore_db_command(project, file, yes, install)?;
         }
         Commands::List => run_list_command()?,
-        Commands::New {
-            name,
-            r#type,
-            ssh,
-            url,
-            host,
-            port,
-            db,
-            user,
-            password_stdin,
-        } => {
-            run_new_command(name, r#type, ssh, url, host, port, db, user, password_stdin)?;
+        Commands::New(args) => {
+            let NewArgs {
+                name,
+                engine,
+                r#type,
+                ssh,
+                url,
+                host,
+                port,
+                db,
+                user,
+                file,
+                account_id,
+                database_id,
+                password_stdin,
+            } = *args;
+            run_new_command(
+                name,
+                engine,
+                r#type,
+                ssh,
+                url,
+                host,
+                port,
+                db,
+                user,
+                file,
+                account_id,
+                database_id,
+                password_stdin,
+            )?;
         }
         Commands::Remove { name, yes } => run_remove_command(name, yes)?,
         Commands::Test { name } => run_test_command(name)?,
@@ -394,6 +432,14 @@ fn run_dump_command(
         std::process::exit(1);
     };
     let proj = config.projects[idx].clone();
+    if proj.engine != Engine::Postgres {
+        eprintln!(
+            "pg-studio dump is only supported for PostgreSQL projects ('{}' is {}).",
+            proj.name,
+            proj.engine.label()
+        );
+        std::process::exit(1);
+    }
 
     let format = match format.as_deref() {
         Some("custom") | None => match &out {
@@ -440,6 +486,19 @@ fn run_restore_db_command(project: String, file: PathBuf, yes: bool, install: bo
         eprintln!("Backup file not found: {}", file.display());
         std::process::exit(1);
     }
+    let config = AppConfig::load()?;
+    let Some(idx) = find_project_index(&config, &project) else {
+        eprintln!("No project named '{project}'.");
+        std::process::exit(1);
+    };
+    if config.projects[idx].engine != Engine::Postgres {
+        eprintln!(
+            "pg-studio restore-db is only supported for PostgreSQL projects ('{}' is {}).",
+            config.projects[idx].name,
+            config.projects[idx].engine.label()
+        );
+        std::process::exit(1);
+    }
     // The safety dump needs pg_dump; the restore itself needs pg_restore or psql.
     if ensure_pg_tools(install)? {
         return Ok(());
@@ -453,11 +512,6 @@ fn run_restore_db_command(project: String, file: PathBuf, yes: bool, install: bo
         std::process::exit(1);
     }
 
-    let config = AppConfig::load()?;
-    let Some(idx) = find_project_index(&config, &project) else {
-        eprintln!("No project named '{project}'.");
-        std::process::exit(1);
-    };
     let proj = config.projects[idx].clone();
 
     let safety = match pg_studio::dbbackup::safety_backup_path(&file) {
@@ -834,14 +888,16 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                 app.mode = AppMode::ConfirmDialog;
             }
             KeyCode::Up | KeyCode::BackTab => {
-                app.active_field = app.active_field.prev(app.connection_type);
+                app.active_field = app.active_field.prev(app.engine, app.connection_type);
             }
             KeyCode::Down | KeyCode::Tab => {
-                app.active_field = app.active_field.next(app.connection_type);
+                app.active_field = app.active_field.next(app.engine, app.connection_type);
             }
             KeyCode::Enter => {
                 if app.active_field == FormField::ConnectionType {
                     app.toggle_connection_type();
+                } else if app.active_field == FormField::Engine {
+                    app.toggle_engine();
                 } else if app.save_form_to_project().is_ok() {
                     app.mode = AppMode::Normal;
                 }
@@ -849,6 +905,8 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
             KeyCode::Char(' ') => {
                 if app.active_field == FormField::ConnectionType {
                     app.toggle_connection_type();
+                } else if app.active_field == FormField::Engine {
+                    app.toggle_engine();
                 }
             }
             _ => {
@@ -1105,47 +1163,51 @@ fn run_list_command() -> Result<()> {
         .map(|s| s.project_name)
         .collect();
     println!(
-        "{:<26} {:<5} {:<38} {:<16} STATUS",
-        "NAME", "TYPE", "TARGET", "DATABASE"
+        "{:<26} {:<8} {:<38} {:<16} STATUS",
+        "NAME", "ENGINE", "TARGET", "DATABASE"
     );
     for p in &config.projects {
-        let ty = match p.connection_type {
-            ConnectionType::Ssh => "ssh",
-            ConnectionType::Url => "url",
-            ConnectionType::Local => "local",
-        };
-        let raw_target: String = match p.connection_type {
-            ConnectionType::Ssh => p.ssh_connection.clone(),
-            ConnectionType::Url => {
-                if p.db_url.is_empty() {
-                    p.db_host.clone()
-                } else {
-                    p.db_url.clone()
-                }
+        let target: String = match p.engine {
+            Engine::Sqlite => p.db_path.clone(),
+            Engine::D1 => format!("{}/{}", p.cf_account_id, p.cf_database_id),
+            _ => {
+                let raw = match p.connection_type {
+                    ConnectionType::Ssh => p.ssh_connection.clone(),
+                    ConnectionType::Url => {
+                        if p.db_url.is_empty() {
+                            p.db_host.clone()
+                        } else {
+                            p.db_url.clone()
+                        }
+                    }
+                    ConnectionType::Local => {
+                        if p.db_host.is_empty() {
+                            "localhost".to_string()
+                        } else {
+                            p.db_host.clone()
+                        }
+                    }
+                };
+                let (redacted, _) = ProjectConfig::redact_url_password(&raw);
+                redacted
             }
-            ConnectionType::Local => {
-                if p.db_host.is_empty() {
-                    "localhost".to_string()
-                } else {
-                    p.db_host.clone()
-                }
-            }
         };
-        let (mut target, _) = ProjectConfig::redact_url_password(&raw_target);
-        if target.is_empty() {
-            target = "-".to_string();
-        }
+        let database = if p.db_name.is_empty() {
+            "-"
+        } else {
+            &p.db_name
+        };
         let status = if running.contains(&p.name) {
             "running"
         } else {
             "-"
         };
         println!(
-            "{:<26} {:<5} {:<38} {:<16} {}",
+            "{:<26} {:<8} {:<38} {:<16} {}",
             trunc(&p.name, 24),
-            ty,
+            p.engine.as_str(),
             trunc(&target, 36),
-            trunc(&p.db_name, 14),
+            trunc(database, 14),
             status
         );
     }
@@ -1155,6 +1217,7 @@ fn run_list_command() -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn run_new_command(
     name: Option<String>,
+    engine_str: Option<String>,
     conn_type: Option<String>,
     ssh: Option<String>,
     url: Option<String>,
@@ -1162,6 +1225,9 @@ fn run_new_command(
     port: Option<String>,
     db: Option<String>,
     user: Option<String>,
+    file: Option<String>,
+    account_id: Option<String>,
+    database_id: Option<String>,
     password_stdin: bool,
 ) -> Result<()> {
     let fail = |msg: &str| -> ! {
@@ -1169,47 +1235,95 @@ fn run_new_command(
         std::process::exit(1);
     };
 
-    let ct: ConnectionType = match &conn_type {
-        Some(t) => match t.parse() {
-            Ok(ct) => ct,
-            Err(e) => fail(&format!("{e:#}")),
+    let engine: Engine = match &engine_str {
+        Some(e) => match e.parse() {
+            Ok(engine) => engine,
+            Err(err) => fail(&format!("{err:#}")),
         },
-        None => fail("Missing --type (ssh, url or local)."),
+        None => Engine::Postgres,
     };
     let ssh = ssh.unwrap_or_default();
     let url = url.unwrap_or_default();
     let host = host.unwrap_or_default();
-    let dbname = match db {
-        Some(d) if !d.trim().is_empty() => d.trim().to_string(),
-        _ => fail("Missing --db <database-name>."),
+    let file = file.unwrap_or_default();
+    let account_id = account_id.unwrap_or_default();
+    let database_id = database_id.unwrap_or_default();
+
+    // Per-engine validation of the required inputs.
+    let (dbname, ct) = match engine {
+        Engine::Sqlite => {
+            if file.trim().is_empty() {
+                fail("--engine sqlite requires --file <path/to/database.db>.");
+            }
+            if let Some(t) = &conn_type
+                && !matches!(t.as_str(), "local" | "")
+            {
+                fail("SQLite projects are always local; omit --type or use --type local.");
+            }
+            (String::new(), ConnectionType::Local)
+        }
+        Engine::D1 => {
+            if account_id.trim().is_empty() || database_id.trim().is_empty() {
+                fail("--engine d1 requires --account-id <id> and --database-id <id>.");
+            }
+            (String::new(), ConnectionType::Url)
+        }
+        Engine::Turso => {
+            if url.trim().is_empty() {
+                fail("--engine turso requires --url <libsql://your-db.turso.io>.");
+            }
+            (String::new(), ConnectionType::Url)
+        }
+        Engine::Postgres | Engine::Mysql => {
+            let ct: ConnectionType = match &conn_type {
+                Some(t) => match t.parse() {
+                    Ok(ct) => ct,
+                    Err(e) => fail(&format!("{e:#}")),
+                },
+                None => fail(&format!(
+                    "Missing --type (ssh, url or local) for --engine {}.",
+                    engine.as_str()
+                )),
+            };
+            match ct {
+                ConnectionType::Ssh if ssh.trim().is_empty() => {
+                    fail("--type ssh requires --ssh <user@host>.");
+                }
+                ConnectionType::Url if url.trim().is_empty() && host.trim().is_empty() => {
+                    fail("--type url requires --url <connection-url> or --host <host>.")
+                }
+                _ => {}
+            }
+            let dbname = match db {
+                Some(d) if !d.trim().is_empty() => d.trim().to_string(),
+                _ => fail("Missing --db <database-name>."),
+            };
+            (dbname, ct)
+        }
     };
-    let dbuser = user.unwrap_or_default();
 
-    match ct {
-        ConnectionType::Ssh if ssh.trim().is_empty() => {
-            fail("--type ssh requires --ssh <user@host>.")
-        }
-        ConnectionType::Url if url.trim().is_empty() && host.trim().is_empty() => {
-            fail("--type url requires --url <postgres://...> or --host <host>.")
-        }
-        _ => {}
-    }
-
-    let derived = ProjectConfig::derive_default_name(ct, &ssh, &host, &dbname);
     let proj = ProjectConfig {
-        name: name.filter(|n| !n.trim().is_empty()).unwrap_or(derived),
+        name: name.filter(|n| !n.trim().is_empty()).unwrap_or_default(),
+        engine,
         connection_type: ct,
         ssh_connection: ssh,
         db_url: url,
         db_host: host,
         db_port: port.unwrap_or_default(),
         db_name: dbname,
-        db_user: dbuser,
+        db_user: user.unwrap_or_default(),
+        db_path: file,
+        cf_account_id: account_id,
+        cf_database_id: database_id,
         last_opened: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64,
     };
+    let mut proj = proj;
+    if proj.name.is_empty() {
+        proj.name = proj.derived_name();
+    }
 
     let mut config = AppConfig::load()?;
     if config.projects.iter().any(|p| p.name == proj.name) {

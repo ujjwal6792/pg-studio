@@ -1,7 +1,7 @@
 use crate::app::{
     ActivePane, App, AppMode, ConfirmationAction, DetailsTab, FormField, ProjectState,
 };
-use crate::config::{ConnectionType, ProjectConfig};
+use crate::config::{ConnectionType, Engine, ProjectConfig};
 use crate::dbbackup::JobStatus;
 use crate::session::SessionStatus;
 use crate::theme::Theme;
@@ -334,11 +334,7 @@ fn project_row(app: &App, selected: bool, inner_width: usize, p: &ProjectConfig)
         Color::Reset
     };
 
-    let icon = match p.connection_type {
-        ConnectionType::Ssh => "󰒋",
-        ConnectionType::Url => "󰖟",
-        ConnectionType::Local => "",
-    };
+    let icon = engine_icon(p.engine, Some(p.connection_type));
 
     let bold = if selected {
         Modifier::BOLD
@@ -355,9 +351,24 @@ fn project_row(app: &App, selected: bool, inner_width: usize, p: &ProjectConfig)
         name_text,
         Style::default().fg(name_color).bg(bg).add_modifier(bold),
     );
-    let pad = inner_width.saturating_sub(3 + 1 + 1 + p.name.chars().count());
+    let pad = inner_width.saturating_sub(3 + icon.chars().count() + 1 + 1 + p.name.chars().count());
     let pad_span = Span::styled(" ".repeat(pad), Style::default().bg(bg));
     Line::from(vec![marker_span, name_span, pad_span])
+}
+
+/// Per-engine list glyph; wire engines keep their transport-specific icons.
+fn engine_icon(engine: Engine, ct: Option<ConnectionType>) -> &'static str {
+    match engine {
+        Engine::Postgres => match ct.unwrap_or(ConnectionType::Local) {
+            ConnectionType::Ssh => "󰒋",
+            ConnectionType::Url => "󰖟",
+            ConnectionType::Local => "",
+        },
+        Engine::Sqlite => "󰆼",
+        Engine::D1 => "",
+        Engine::Turso => "",
+        Engine::Mysql => "󰐅",
+    }
 }
 
 fn draw_details(f: &mut Frame, app: &App, area: Rect) {
@@ -449,66 +460,98 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(app.theme.text),
         )),
         Line::from(Span::styled(
-            format!(
-                " Connection Type   : {}",
-                match proj.connection_type {
-                    ConnectionType::Ssh => "SSH Tunnel",
-                    ConnectionType::Url => "Public URL",
-                    ConnectionType::Local => "Local",
-                }
-            ),
+            format!(" Engine            : {}", proj.engine.label()),
             Style::default().fg(app.theme.text),
         )),
     ];
 
-    match proj.connection_type {
-        ConnectionType::Ssh => {
+    match proj.engine {
+        Engine::Sqlite => {
             lines.push(Line::from(Span::styled(
-                format!(" SSH               : {}", proj.ssh_connection),
-                Style::default().fg(app.theme.text),
-            )));
-            lines.push(Line::from(Span::styled(
-                format!(" Remote Port       : {}", proj.db_port),
+                format!(" DB File           : {}", proj.db_path),
                 Style::default().fg(app.theme.text),
             )));
         }
-        ConnectionType::Url => {
-            if !proj.db_url.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!(" URL               : {}", proj.db_url),
-                    Style::default().fg(app.theme.text),
-                )));
-            } else {
-                lines.push(Line::from(Span::styled(
-                    format!(" Host              : {}", proj.db_host),
-                    Style::default().fg(app.theme.text),
-                )));
-                lines.push(Line::from(Span::styled(
-                    format!(" Port              : {}", proj.db_port),
-                    Style::default().fg(app.theme.text),
-                )));
+        Engine::D1 => {
+            lines.push(Line::from(Span::styled(
+                format!(" CF Account ID     : {}", proj.cf_account_id),
+                Style::default().fg(app.theme.text),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(" D1 Database ID    : {}", proj.cf_database_id),
+                Style::default().fg(app.theme.text),
+            )));
+        }
+        Engine::Turso => {
+            lines.push(Line::from(Span::styled(
+                format!(" URL               : {}", proj.db_url),
+                Style::default().fg(app.theme.text),
+            )));
+        }
+        Engine::Postgres | Engine::Mysql => {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " Connection Type   : {}",
+                    match proj.connection_type {
+                        ConnectionType::Ssh => "SSH Tunnel",
+                        ConnectionType::Url => "Public URL",
+                        ConnectionType::Local => "Local",
+                    }
+                ),
+                Style::default().fg(app.theme.text),
+            )));
+
+            match proj.connection_type {
+                ConnectionType::Ssh => {
+                    lines.push(Line::from(Span::styled(
+                        format!(" SSH               : {}", proj.ssh_connection),
+                        Style::default().fg(app.theme.text),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        format!(" Remote Port       : {}", proj.db_port),
+                        Style::default().fg(app.theme.text),
+                    )));
+                }
+                ConnectionType::Url => {
+                    if !proj.db_url.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            format!(" URL               : {}", proj.db_url),
+                            Style::default().fg(app.theme.text),
+                        )));
+                    } else {
+                        lines.push(Line::from(Span::styled(
+                            format!(" Host              : {}", proj.db_host),
+                            Style::default().fg(app.theme.text),
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            format!(" Port              : {}", proj.db_port),
+                            Style::default().fg(app.theme.text),
+                        )));
+                    }
+                }
+                ConnectionType::Local => {
+                    lines.push(Line::from(Span::styled(
+                        format!(" Host              : {}", proj.db_host),
+                        Style::default().fg(app.theme.text),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        format!(" Port              : {}", proj.db_port),
+                        Style::default().fg(app.theme.text),
+                    )));
+                }
             }
-        }
-        ConnectionType::Local => {
+
             lines.push(Line::from(Span::styled(
-                format!(" Host              : {}", proj.db_host),
+                format!(" Database          : {}", proj.db_name),
                 Style::default().fg(app.theme.text),
             )));
             lines.push(Line::from(Span::styled(
-                format!(" Port              : {}", proj.db_port),
+                format!(" User              : {}", proj.db_user),
                 Style::default().fg(app.theme.text),
             )));
         }
     }
 
-    lines.push(Line::from(Span::styled(
-        format!(" Database          : {}", proj.db_name),
-        Style::default().fg(app.theme.text),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!(" User              : {}", proj.db_user),
-        Style::default().fg(app.theme.text),
-    )));
     lines.push(Line::from(Span::styled(
         format!(" Last Opened       : {}", app.formatted_last_opened()),
         Style::default().fg(app.theme.info),
@@ -547,73 +590,131 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
     )];
 
     fields.push((
-        FormField::ConnectionType,
-        "Connection Type".to_string(),
-        match app.connection_type {
-            ConnectionType::Ssh => "SSH (Enter to cycle)".to_string(),
-            ConnectionType::Url => "URL (Enter to cycle)".to_string(),
-            ConnectionType::Local => "Local (Enter to cycle)".to_string(),
-        },
+        FormField::Engine,
+        "Engine".to_string(),
+        format!("{} (Enter to cycle)", app.engine.label()),
         false,
     ));
 
-    match app.connection_type {
-        ConnectionType::Ssh => {
+    match app.engine {
+        Engine::Postgres | Engine::Mysql => {
             fields.push((
-                FormField::SshConnection,
-                "SSH String".to_string(),
-                app.input_ssh.value().to_string(),
+                FormField::ConnectionType,
+                "Connection Type".to_string(),
+                match app.connection_type {
+                    ConnectionType::Ssh => "SSH (Enter to cycle)".to_string(),
+                    ConnectionType::Url => "URL (Enter to cycle)".to_string(),
+                    ConnectionType::Local => "Local (Enter to cycle)".to_string(),
+                },
+                false,
+            ));
+
+            match app.connection_type {
+                ConnectionType::Ssh => {
+                    fields.push((
+                        FormField::SshConnection,
+                        "SSH String".to_string(),
+                        app.input_ssh.value().to_string(),
+                        false,
+                    ));
+                }
+                ConnectionType::Url => {
+                    fields.push((
+                        FormField::DbUrl,
+                        "Connection URL".to_string(),
+                        app.input_url.value().to_string(),
+                        false,
+                    ));
+                    fields.push((
+                        FormField::DbHost,
+                        "Database Host".to_string(),
+                        app.input_host.value().to_string(),
+                        false,
+                    ));
+                }
+                ConnectionType::Local => {
+                    fields.push((
+                        FormField::DbHost,
+                        "Database Host".to_string(),
+                        app.input_host.value().to_string(),
+                        false,
+                    ));
+                }
+            }
+
+            fields.push((
+                FormField::DbPort,
+                "Remote DB Port".to_string(),
+                app.input_port.value().to_string(),
+                false,
+            ));
+            fields.push((
+                FormField::DbName,
+                "Database Name".to_string(),
+                app.input_dbname.value().to_string(),
+                false,
+            ));
+            fields.push((
+                FormField::DbUser,
+                "Database User".to_string(),
+                app.input_dbuser.value().to_string(),
+                false,
+            ));
+            let pass_label = if app.engine == Engine::Mysql {
+                "MySQL Password"
+            } else {
+                "Database Pass"
+            };
+            fields.push((
+                FormField::DbPass,
+                pass_label.to_string(),
+                app.input_dbpass.value().to_string(),
+                true,
+            ));
+        }
+        Engine::Sqlite => {
+            fields.push((
+                FormField::DbPath,
+                "DB File Path".to_string(),
+                app.input_dbpath.value().to_string(),
                 false,
             ));
         }
-        ConnectionType::Url => {
+        Engine::D1 => {
+            fields.push((
+                FormField::CfAccountId,
+                "CF Account ID".to_string(),
+                app.input_cf_account.value().to_string(),
+                false,
+            ));
+            fields.push((
+                FormField::CfDatabaseId,
+                "D1 Database ID".to_string(),
+                app.input_cf_database.value().to_string(),
+                false,
+            ));
+            fields.push((
+                FormField::DbPass,
+                "API Token".to_string(),
+                app.input_dbpass.value().to_string(),
+                true,
+            ));
+        }
+        Engine::Turso => {
             fields.push((
                 FormField::DbUrl,
-                "Connection URL".to_string(),
+                "Turso URL".to_string(),
                 app.input_url.value().to_string(),
                 false,
             ));
             fields.push((
-                FormField::DbHost,
-                "Database Host".to_string(),
-                app.input_host.value().to_string(),
-                false,
-            ));
-        }
-        ConnectionType::Local => {
-            fields.push((
-                FormField::DbHost,
-                "Database Host".to_string(),
-                app.input_host.value().to_string(),
-                false,
+                FormField::DbPass,
+                "Auth Token".to_string(),
+                app.input_dbpass.value().to_string(),
+                true,
             ));
         }
     }
-
-    fields.push((
-        FormField::DbPort,
-        "Remote DB Port".to_string(),
-        app.input_port.value().to_string(),
-        false,
-    ));
-    fields.push((
-        FormField::DbName,
-        "Database Name".to_string(),
-        app.input_dbname.value().to_string(),
-        false,
-    ));
-    fields.push((
-        FormField::DbUser,
-        "Database User".to_string(),
-        app.input_dbuser.value().to_string(),
-        false,
-    ));
-    fields.push((
-        FormField::DbPass,
-        "Database Pass".to_string(),
-        app.input_dbpass.value().to_string(),
-        true,
-    ));
 
     let n = fields.len();
     let mut constraints: Vec<Constraint> = fields.iter().map(|_| Constraint::Length(2)).collect();
@@ -634,17 +735,22 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
             && app.active_field == *field_type
             && app.mode == AppMode::EditingForm;
 
+        let port_hint = if app.engine == Engine::Mysql {
+            "3306"
+        } else {
+            "5432"
+        };
         let (display_val, val_style) = if *field_type == FormField::DbPort && value.is_empty() {
             if is_active {
                 (
-                    "5432 (default)".to_string(),
+                    format!("{port_hint} (default)"),
                     Style::default()
                         .fg(app.theme.text)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
                 (
-                    "5432 (default)".to_string(),
+                    format!("{port_hint} (default)"),
                     Style::default().fg(app.theme.muted),
                 )
             }

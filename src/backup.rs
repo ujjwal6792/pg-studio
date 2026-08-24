@@ -65,6 +65,7 @@ mod tests {
     fn sample_projects() -> Vec<ProjectConfig> {
         vec![ProjectConfig {
             name: "test-proj".into(),
+            engine: crate::config::Engine::Postgres,
             connection_type: crate::config::ConnectionType::Local,
             ssh_connection: String::new(),
             db_url: String::new(),
@@ -72,6 +73,9 @@ mod tests {
             db_port: "5432".into(),
             db_name: "postgres".into(),
             db_user: "postgres".into(),
+            db_path: String::new(),
+            cf_account_id: String::new(),
+            cf_database_id: String::new(),
             last_opened: 7,
         }]
     }
