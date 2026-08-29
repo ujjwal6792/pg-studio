@@ -168,6 +168,10 @@ fn write_drizzle_config(workspace_dir: &Path, engine: Engine) -> Result<()> {
         Engine::D1 => "  driver: 'd1-http',\n",
         _ => "",
     };
+    let extensions_line = match engine {
+        Engine::Postgres => "  extensionsFilters: ['postgis'],\n",
+        _ => "",
+    };
     let credentials_block = match engine {
         Engine::Postgres | Engine::Mysql | Engine::Sqlite => {
             "  dbCredentials: {\n    url: process.env.DATABASE_URL!,\n  },\n"
@@ -180,7 +184,7 @@ fn write_drizzle_config(workspace_dir: &Path, engine: Engine) -> Result<()> {
         }
     };
     let config_content = format!(
-        "import {{ defineConfig }} from 'drizzle-kit';\n\nexport default defineConfig({{\n  schema: './drizzle/schema.ts',\n  out: './drizzle',\n{dialect_line}{driver_line}{credentials_block}}});\n"
+        "import {{ defineConfig }} from 'drizzle-kit';\n\nexport default defineConfig({{\n  schema: './drizzle/schema.ts',\n  out: './drizzle',\n{dialect_line}{driver_line}{extensions_line}{credentials_block}}});\n"
     );
     let config_path = workspace_dir.join("drizzle.config.ts");
     fs::write(&config_path, config_content).context("Failed to write drizzle.config.ts")?;
@@ -428,23 +432,28 @@ mod tests {
         assert!(pg.contains("dialect: 'postgresql'"));
         assert!(pg.contains("url: process.env.DATABASE_URL!"));
         assert!(!pg.contains("driver:"));
+        assert!(pg.contains("extensionsFilters: ['postgis']"));
 
         let my = generated_config(Engine::Mysql);
         assert!(my.contains("dialect: 'mysql'"));
+        assert!(!my.contains("extensionsFilters"));
 
         let lite = generated_config(Engine::Sqlite);
         assert!(lite.contains("dialect: 'sqlite'"));
         assert!(lite.contains("url: process.env.DATABASE_URL!"));
+        assert!(!lite.contains("extensionsFilters"));
 
         let d1 = generated_config(Engine::D1);
         assert!(d1.contains("dialect: 'sqlite'"));
         assert!(d1.contains("driver: 'd1-http'"));
         assert!(d1.contains("accountId: process.env.CLOUDFLARE_ACCOUNT_ID!"));
         assert!(d1.contains("token: process.env.CLOUDFLARE_D1_TOKEN!"));
+        assert!(!d1.contains("extensionsFilters"));
 
         let turso = generated_config(Engine::Turso);
         assert!(turso.contains("dialect: 'turso'"));
         assert!(turso.contains("authToken: process.env.TURSO_AUTH_TOKEN"));
+        assert!(!turso.contains("extensionsFilters"));
     }
 
     #[test]
