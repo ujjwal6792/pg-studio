@@ -713,7 +713,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, term: Rect) {
                 select_project_at_row(app, mouse.row, list);
             } else if rect_contains(details, mouse.column, mouse.row) {
                 app.active_pane = ActivePane::Details;
-                select_tab_at_column(app, mouse.column, details);
+                if let Some(tab) = details_tab_at(details, mouse.column, mouse.row) {
+                    app.details_tab = tab;
+                }
             } else if rect_contains(logs, mouse.column, mouse.row) {
                 app.scroll_logs(0); // clicking the logs pane snaps back to latest
             }
@@ -742,20 +744,23 @@ fn select_project_at_row(app: &mut App, row: u16, list_area: Rect) {
 
 /// Maps a click inside the Details pane to one of the three sub-tab boxes.
 /// Must mirror the tab widths used by `draw_details_subtabs`.
-fn select_tab_at_column(app: &mut App, column: u16, details_area: Rect) {
+fn details_tab_at(details_area: Rect, column: u16, row: u16) -> Option<DetailsTab> {
+    if row < details_area.y + 1 || row >= details_area.y + 4 {
+        return None;
+    }
     const TAB_WIDTHS: [(DetailsTab, u16); 3] = [
         (DetailsTab::Overview, 15),
         (DetailsTab::Config, 13),
         (DetailsTab::Process, 14),
     ];
-    let mut x = details_area.x + 1; // left border
+    let mut x = details_area.x + 1;
     for (tab, w) in TAB_WIDTHS {
         if column >= x && column < x + w {
-            app.details_tab = tab;
-            return;
+            return Some(tab);
         }
         x += w;
     }
+    None
 }
 
 /// Dispatches a key press. Returns `Ok(true)` when the app should exit.
@@ -831,10 +836,10 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
             KeyCode::Char('u') => {
                 app.start_update();
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') if app.active_pane == ActivePane::ProjectsList => {
                 app.move_selection(-1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') if app.active_pane == ActivePane::ProjectsList => {
                 app.move_selection(1);
             }
             KeyCode::Enter => {
@@ -879,6 +884,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
             KeyCode::Char('c') => {
                 app.copy_selected_url();
             }
+            KeyCode::Char('l') => app.copy_selected_logs(),
             _ => {}
         },
 
@@ -1097,6 +1103,7 @@ fn execute_help_action(app: &mut App, action: HelpAction) -> Result<bool> {
                 app.start_selected_project(false);
             }
         }
+        CopyLogs => app.copy_selected_logs(),
         ExportProjects => do_export(app),
         ImportProjects => do_import(app),
         UpdateApp => app.start_update(),
@@ -1511,4 +1518,18 @@ fn run_stop_command(name: String) -> Result<()> {
         }
     }
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mouse_tab_hit_testing_ignores_details_body() {
+        let area = Rect::new(10, 5, 60, 20);
+        assert_eq!(details_tab_at(area, 11, 6), Some(DetailsTab::Overview));
+        assert_eq!(details_tab_at(area, 26, 6), Some(DetailsTab::Config));
+        assert_eq!(details_tab_at(area, 39, 6), Some(DetailsTab::Process));
+        assert_eq!(details_tab_at(area, 11, 9), None);
+        assert_eq!(details_tab_at(area, 10, 6), None);
+        assert_eq!(details_tab_at(area, 53, 6), None);
+    }
 }

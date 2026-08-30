@@ -243,19 +243,33 @@ pub fn prepare_workspace(
         ));
     }
 
-    // Sanitize only where the artifacts occur: broken SQL default casts
-    // (`::`, bytea-derived `unknown(`) are Postgres-specific pull output.
-    if engine == Engine::Postgres {
+    // Sanitize generated artifacts only for dialects with known invalid output.
+    if matches!(engine, Engine::Postgres | Engine::D1) {
         let schema_path = workspace_dir.join("drizzle").join("schema.ts");
         if schema_path.exists() {
             let schema = fs::read_to_string(&schema_path)
                 .context("Failed to read schema.ts for sanitization")?;
-            let (new_schema, sanitized) = sanitize_pg_schema(&schema);
-            if sanitized {
-                log(
-                    logs,
-                    "Sanitizing invalid default values in generated schema...".to_string(),
-                );
+            let (new_schema, changed) = if engine == Engine::D1 {
+                let (schema, count) = sanitize_d1_schema(&schema);
+                if count > 0 {
+                    log(
+                        logs,
+                        format!(
+                            "Removed {count} generated D1 CHECK declarations that Drizzle Studio cannot load."
+                        ),
+                    );
+                }
+                (schema, count > 0)
+            } else {
+                sanitize_pg_schema(&schema)
+            };
+            if changed {
+                if engine == Engine::Postgres {
+                    log(
+                        logs,
+                        "Sanitizing invalid default values in generated schema...".to_string(),
+                    );
+                }
                 fs::write(&schema_path, new_schema)
                     .context("Failed to write sanitized schema.ts")?;
             }
@@ -267,13 +281,12 @@ pub fn prepare_workspace(
 
 /// Removes Postgres-specific invalid default values from a generated
 /// schema.ts. Returns `(sanitized_output, changed)`.
+/// Removes Postgres-specific invalid default values from a generated schema.ts.
 fn sanitize_pg_schema(schema: &str) -> (String, bool) {
     let mut sanitized = false;
     let mut new_schema = String::new();
-
     for line in schema.lines() {
         let mut current_line = line.to_string();
-
         if current_line.contains(".default(')") {
             current_line = current_line.replace(".default(')", ".default('')");
             sanitized = true;
@@ -282,7 +295,6 @@ fn sanitize_pg_schema(schema: &str) -> (String, bool) {
             current_line = current_line.replace(".default(\")", ".default(\"\")");
             sanitized = true;
         }
-
         if current_line.contains(".default(")
             && (current_line.contains("\\'") || current_line.contains("::"))
             && let Some(start_idx) = current_line.find(".default(")
@@ -301,10 +313,8 @@ fn sanitize_pg_schema(schema: &str) -> (String, bool) {
                 }
             }
             if open_brackets == 0 {
-                let mut fixed = String::new();
-                fixed.push_str(&current_line[..start_idx]);
-                fixed.push_str(&current_line[end_idx + 1..]);
-                new_schema.push_str(&fixed);
+                new_schema.push_str(&current_line[..start_idx]);
+                new_schema.push_str(&current_line[end_idx + 1..]);
                 new_schema.push('\n');
                 sanitized = true;
                 continue;
@@ -313,13 +323,28 @@ fn sanitize_pg_schema(schema: &str) -> (String, bool) {
         new_schema.push_str(&current_line);
         new_schema.push('\n');
     }
-
     if new_schema.contains("unknown(") {
         new_schema = new_schema.replace("unknown(", "text(");
         sanitized = true;
     }
-
     (new_schema, sanitized)
+}
+
+fn sanitize_d1_schema(schema: &str) -> (String, usize) {
+    let mut output = String::new();
+    let mut removed = 0;
+    for line in schema.lines() {
+        if line.trim_start().starts_with("check(") {
+            removed += 1;
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !schema.ends_with('\n') && output.ends_with('\n') {
+        output.pop();
+    }
+    (output, removed)
 }
 
 /// Spawns `drizzle-kit studio` as a background process bound to a specific port,
@@ -471,5 +496,16 @@ mod tests {
 
         let (_, changed) = sanitize_pg_schema("export const clean = 1;");
         assert!(!changed);
+        #[test]
+        fn d1_sanitizer_removes_generated_check_declarations() {
+            let input = "export const orgs = sqliteTable('orgs', {\n  id: integer('id').primaryKey()\n  check(\"orgs_check_1\", sql`id > 0`),\n  check(\"orgs_check_1\", sql`id < 100`),\n});";
+            let (output, removed) = sanitize_d1_schema(input);
+            assert_eq!(removed, 2);
+            assert_eq!(
+                output,
+                "export const orgs = sqliteTable('orgs', {\n  id: integer('id').primaryKey()\n});"
+            );
+            assert_eq!(sanitize_d1_schema("const clean = 1;").0, "const clean = 1;");
+        }
     }
 }

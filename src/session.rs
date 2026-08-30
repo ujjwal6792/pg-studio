@@ -32,7 +32,7 @@ pub struct RunningSession {
 }
 
 impl RunningSession {
-    pub fn stop(&mut self) {
+    fn terminate_processes(&mut self) {
         #[cfg(unix)]
         if let Some(pid) = self.studio_pid {
             unsafe {
@@ -51,10 +51,23 @@ impl RunningSession {
             let _ = child.kill();
             let _ = child.wait();
         }
-        // Dropping the SSH tunnel kills the ssh process.
         self.ssh = None;
+        self.studio_pid = None;
+        self.log_path = None;
+    }
+
+    pub fn stop(&mut self) {
+        self.terminate_processes();
         self.auto_open = false;
         self.status = SessionStatus::Stopped;
+    }
+
+    pub fn fail(&mut self, error: String) {
+        self.terminate_processes();
+        self.auto_open = false;
+        self.studio_ready = false;
+        self.error = Some(error);
+        self.status = SessionStatus::Error;
     }
 
     pub fn url(&self) -> Option<&str> {

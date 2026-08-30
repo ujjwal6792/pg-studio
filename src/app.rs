@@ -82,6 +82,7 @@ pub enum HelpAction {
     StopProject,
     OpenUrl,
     CopyUrl,
+    CopyLogs,
     Connect,
     RunNoBrowser,
     ExportProjects,
@@ -190,6 +191,11 @@ pub fn help_entries() -> Vec<HelpEntry> {
             "c",
             "Copy the running studio URL to the clipboard",
             Some(CopyUrl),
+        ),
+        e(
+            "l",
+            "Copy the selected project's Drizzle Studio logs",
+            Some(CopyLogs),
         ),
         e(
             "URL",
@@ -1509,9 +1515,32 @@ impl App {
             .find(|s| s.lock().map(|g| g.project_name == name).unwrap_or(false))
             .cloned()
     }
-
     pub fn selected_session(&self) -> Option<Arc<Mutex<RunningSession>>> {
         self.session_for(&self.selected_project_name())
+    }
+
+    fn selected_session_log_text(&self) -> Option<(String, usize, String)> {
+        let session = self.selected_session()?;
+        let name = self.selected_project_name();
+        let logs = session.lock().ok()?.logs.lock().ok()?.clone();
+        Some((name, logs.len(), logs.join("\n")))
+    }
+
+    pub fn copy_selected_logs(&mut self) {
+        let Some((project, count, text)) = self.selected_session_log_text() else {
+            self.add_log("No Drizzle Studio logs for the selected project.".to_string());
+            return;
+        };
+        if count == 0 {
+            self.add_log("No Drizzle Studio logs for the selected project.".to_string());
+            return;
+        }
+        match crate::open::copy_to_clipboard(&text) {
+            Ok(()) => self.add_log(format!(
+                "Copied {count} log lines for '{project}' to clipboard."
+            )),
+            Err(e) => self.add_log(format!("Failed to copy logs: {e:#}")),
+        }
     }
 
     pub fn selected_url(&self) -> Option<String> {
@@ -2108,12 +2137,8 @@ fn run_session(
 
     push_session_log(
         &session,
-        format!(
-            "Drizzle Studio running at https://local.drizzle.studio?port={}",
-            studio_port
-        ),
+        format!("Drizzle Studio started; waiting for readiness on port {studio_port}."),
     );
-    add_global_log(&global_logs, format!("Project '{}' is running.", name));
 }
 
 fn port_in_use(port: u16) -> bool {
@@ -2154,7 +2179,6 @@ fn tail_session_log(
     start_offset: u64,
 ) {
     use std::io::{Read, Seek, SeekFrom};
-
     let mut file = match std::fs::File::open(&log_path) {
         Ok(f) => f,
         Err(_) => return,
@@ -2165,17 +2189,13 @@ fn tail_session_log(
     let mut offset = start_offset;
     let mut partial = String::new();
     let mut dead_ticks = 0u32;
-
     loop {
-        {
-            let Ok(s) = session.lock() else {
-                break;
-            };
-            if matches!(s.status, SessionStatus::Stopped | SessionStatus::Error) {
-                break;
-            }
+        let Ok(state) = session.lock() else { break };
+        if matches!(state.status, SessionStatus::Stopped | SessionStatus::Error) {
+            break;
         }
-
+        drop(state);
+        let mut saw_url = false;
         if let Ok(meta) = std::fs::metadata(&log_path)
             && meta.len() > offset
         {
@@ -2184,13 +2204,9 @@ fn tail_session_log(
             {
                 offset += chunk.len() as u64;
                 partial.push_str(&chunk);
-                let mut drained: Vec<String> = Vec::new();
                 while let Some(idx) = partial.find('\n') {
                     let line: String = partial.drain(..idx).collect();
                     partial.drain(..1);
-                    drained.push(line);
-                }
-                for line in drained {
                     let line = line.trim_end_matches('\r').to_string();
                     if line.trim().is_empty() {
                         continue;
@@ -2200,33 +2216,81 @@ fn tail_session_log(
                     {
                         l.push(line.clone());
                     }
-                    if let Some(url) = extract_tunnel_url(&line)
-                        && let Ok(mut s) = session.lock()
-                    {
-                        s.tunnel_url = Some(url);
-                        s.studio_ready = true;
+                    if let Some(url) = extract_tunnel_url(&line) {
+                        saw_url = true;
+                        if let Ok(mut s) = session.lock() {
+                            s.tunnel_url = Some(url);
+                        }
                     }
                 }
             }
         }
-
-        let (port, project_name, ready) = {
-            let Ok(s) = session.lock() else {
-                break;
-            };
-            (s.studio_port, s.project_name.clone(), s.studio_ready)
+        let (port, project_name, ready, exited) = {
+            let Ok(mut s) = session.lock() else { break };
+            let mut exited = None;
+            if let Some(child) = s.studio_child.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        s.studio_child = None;
+                        s.studio_pid = None;
+                        exited = Some(status);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        let msg = format!("Could not monitor Drizzle Studio: {e}");
+                        s.fail(msg.clone());
+                        add_global_log(
+                            &global,
+                            format!("Project '{}' failed: {msg}", s.project_name),
+                        );
+                        break;
+                    }
+                }
+            }
+            (
+                s.studio_port,
+                s.project_name.clone(),
+                s.studio_ready,
+                exited,
+            )
         };
-        if ready && port_in_use(port) {
+        if let Some(status) = exited {
+            let message = if ready {
+                format!("Drizzle Studio exited unexpectedly ({status}).")
+            } else {
+                format!("Drizzle Studio exited before becoming ready ({status}).")
+            };
+            if let Ok(mut s) = session.lock() {
+                s.fail(message.clone());
+            }
+            add_global_log(
+                &global,
+                format!("Project '{}' failed: {message}", project_name),
+            );
+            break;
+        }
+        let became_ready = !ready && (saw_url || port_in_use(port));
+        if became_ready {
+            if let Ok(mut s) = session.lock() {
+                if s.status == SessionStatus::Starting {
+                    s.status = SessionStatus::Running;
+                    s.studio_ready = true;
+                }
+            }
+            add_global_log(&global, format!("Project '{}' is running.", project_name));
+        } else if ready && port_in_use(port) {
             dead_ticks = 0;
         } else if ready {
             dead_ticks += 1;
             if dead_ticks >= 10 {
-                if let Ok(mut s) = session.lock()
-                    && s.status == SessionStatus::Running
-                {
-                    s.stop();
+                let message = format!("Drizzle Studio stopped listening on port {port}.");
+                if let Ok(mut s) = session.lock() {
+                    s.fail(message.clone());
                 }
-                add_global_log(&global, format!("Project '{}' exited.", project_name));
+                add_global_log(
+                    &global,
+                    format!("Project '{}' failed: {message}", project_name),
+                );
                 break;
             }
         }
@@ -2435,5 +2499,94 @@ mod tests {
         // Empty path must fail validation.
         app.input_dbpath = Input::default();
         assert!(app.build_sqlite_project().is_err());
+    }
+    #[test]
+    fn selected_session_log_text_preserves_order() {
+        let mut app = bare_app();
+        app.config.projects.push(ProjectConfig {
+            name: "demo".to_string(),
+            engine: Engine::Sqlite,
+            connection_type: ConnectionType::Local,
+            ssh_connection: String::new(),
+            db_url: String::new(),
+            db_host: String::new(),
+            db_port: String::new(),
+            db_name: String::new(),
+            db_user: String::new(),
+            db_path: "/tmp/demo.db".to_string(),
+            cf_account_id: String::new(),
+            cf_database_id: String::new(),
+            last_opened: 0,
+        });
+        let logs = Arc::new(Mutex::new(vec!["first".to_string(), "second".to_string()]));
+        app.sessions.push(Arc::new(Mutex::new(RunningSession {
+            project_name: "demo".to_string(),
+            studio_port: 1,
+            ssh: None,
+            studio_child: None,
+            status: SessionStatus::Starting,
+            logs: logs.clone(),
+            tunnel_url: None,
+            error: None,
+            auto_open: false,
+            studio_ready: false,
+            studio_pid: None,
+            ssh_pid: None,
+            log_path: None,
+            started_at: None,
+        })));
+        let (name, count, text) = app.selected_session_log_text().unwrap();
+        assert_eq!(
+            (name, count, text),
+            ("demo".to_string(), 2, "first\nsecond".to_string())
+        );
+        *logs.lock().unwrap() = Vec::new();
+        assert_eq!(app.selected_session_log_text().unwrap().1, 0);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn studio_exit_marks_session_error() {
+        let path = std::env::temp_dir().join(format!("pg-studio-exit-{}", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .unwrap();
+        let session = Arc::new(Mutex::new(RunningSession {
+            project_name: "demo".to_string(),
+            studio_port: 0,
+            ssh: None,
+            studio_child: Some(child),
+            status: SessionStatus::Starting,
+            logs: Arc::new(Mutex::new(Vec::new())),
+            tunnel_url: None,
+            error: None,
+            auto_open: true,
+            studio_ready: false,
+            studio_pid: None,
+            ssh_pid: None,
+            log_path: Some(path.clone()),
+            started_at: None,
+        }));
+        let global = Arc::new(Mutex::new(Vec::new()));
+        tail_session_log(session.clone(), global.clone(), path.clone(), 0);
+        let state = session.lock().unwrap();
+        assert_eq!(state.status, SessionStatus::Error);
+        assert!(!state.auto_open);
+        assert!(
+            state
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("exited before becoming ready")
+        );
+        assert!(
+            global
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("demo' failed"))
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
