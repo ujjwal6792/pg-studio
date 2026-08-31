@@ -1179,22 +1179,25 @@ fn fit_footer_items(items: &[(&str, &str)], theme: &Theme, avail: u16) -> Vec<Sp
 }
 
 fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
-    let (title, prompt, theme_color) = match action {
+    let (title, prompt, theme_color, icon) = match action {
         ConfirmationAction::DeleteProject => (
             " Delete Project ",
             "Are you sure you want to delete this project?".to_string(),
             app.theme.error,
+            "⚠",
         ),
         ConfirmationAction::CancelEdit => (
             " Discard Changes ",
             "Are you sure you want to discard unsaved changes?".to_string(),
             app.theme.warn,
+            "⚠",
         ),
         ConfirmationAction::Quit => (
             " Exit pg-studio ",
             "Are you sure you want to exit pg-studio? Running studios will keep running in the background."
                 .to_string(),
             app.theme.accent,
+            "󰍃",
         ),
         ConfirmationAction::StopProject => (
             " Stop Project ",
@@ -1203,6 +1206,7 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
                 app.selected_project_name()
             ),
             app.theme.warn,
+            "⏹",
         ),
         ConfirmationAction::MissingPgDump => {
             let pm = app
@@ -1216,6 +1220,7 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
                     crate::installer::suggest_command(pm)
                 ),
                 app.theme.accent,
+                "󰏗",
             )
         }
         ConfirmationAction::RestoreDatabase => {
@@ -1235,6 +1240,7 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
                     proj.db_name, proj.name, file, safety
                 ),
                 app.theme.error,
+                "⚠",
             )
         }
     };
@@ -1246,33 +1252,41 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
     let inner_width = max_width.saturating_sub(2 + H_PAD * 2) as usize;
 
     let wrapped = wrap_text(&prompt, inner_width.max(1));
+
+    // Icon line (colored, bold) — sits above the prompt
+    let icon_line = Line::from(Span::styled(
+        format!(" {icon} "),
+        Style::default()
+            .fg(theme_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+
     let prompt_lines: Vec<Line> = wrapped
         .iter()
         .map(|l| {
             Line::from(Span::styled(
                 l.as_str(),
-                Style::default()
-                    .fg(app.theme.text)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(app.theme.text),
             ))
         })
         .collect();
 
     let hint_line = Line::from(vec![
         Span::styled(
-            " ⏎ ",
+            " ⏎/y ",
             Style::default()
                 .fg(app.theme.success)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Confirm      ", Style::default().fg(app.theme.dim)),
+        Span::styled("Confirm", Style::default().fg(app.theme.muted)),
+        Span::styled(" · ", Style::default().fg(app.theme.muted)),
         Span::styled(
-            " ⎋ ",
+            " ⎋/n ",
             Style::default()
                 .fg(app.theme.error)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Cancel", Style::default().fg(app.theme.dim)),
+        Span::styled("Cancel", Style::default().fg(app.theme.muted)),
     ]);
 
     let longest_prompt = wrapped
@@ -1280,7 +1294,7 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
         .map(|l| l.chars().count() as u16)
         .max()
         .unwrap_or(0);
-    let hint_width = 21u16;
+    let hint_width = 26u16; // " ⏎/y Confirm · ⎋/n Cancel"
     let content_width = longest_prompt
         .max(hint_width)
         .max(title.chars().count() as u16);
@@ -1288,13 +1302,20 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
         .clamp(24, max_width)
         .min(term.width.saturating_sub(2));
 
-    let content_height = prompt_lines.len() as u16 + 1 + 1; // prompt + blank + hint
+    let content_height = prompt_lines.len() as u16 + 1 + 1 + 1 + 1; // icon + prompt + blank + separator + hint
     let height = (2 + V_PAD * 2 + content_height).min(term.height.saturating_sub(2));
 
     let area = centered_rect_fixed(width, height, term);
 
-    let mut popup_text = prompt_lines;
+    let separator = Line::from(Span::styled(
+        "─".repeat(inner_width.min(content_width as usize)),
+        Style::default().fg(app.theme.muted),
+    ));
+
+    let mut popup_text = vec![icon_line];
+    popup_text.extend(prompt_lines);
     popup_text.push(Line::from(""));
+    popup_text.push(separator);
     popup_text.push(hint_line);
 
     let popup_block = Block::default()
@@ -1307,13 +1328,16 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme_color))
-        .style(Style::default().bg(app.theme.highlight_bg))
+        .style(Style::default().bg(Color::Rgb(0x17, 0x12, 0x12)))
         .padding(Padding::new(H_PAD, H_PAD, V_PAD, V_PAD));
 
     let paragraph = Paragraph::new(popup_text)
         .alignment(Alignment::Center)
         .block(popup_block);
 
+    // Dim the background behind the popup
+    let overlay = Block::default().style(Style::default().bg(Color::Rgb(0x17, 0x12, 0x12)));
+    f.render_widget(overlay, term);
     f.render_widget(Clear, area);
     f.render_widget(paragraph, area);
 }

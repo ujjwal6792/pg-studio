@@ -1,6 +1,6 @@
 [package]
 name = "pg-studio"
-version = "0.5.2"
+version = "0.5.3"
 description = "A CLI tool to introspect PostgreSQL, SQLite, Cloudflare D1, Turso and MySQL databases and launch Drizzle Studio"
 license = "MIT"
 edition = "2024"
