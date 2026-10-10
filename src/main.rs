@@ -431,7 +431,10 @@ fn run_dump_command(
         );
         std::process::exit(1);
     };
-    let proj = config.projects[idx].clone();
+    let Some(proj) = selected_project(&config, idx) else {
+        eprintln!("Selection no longer exists.");
+        std::process::exit(1);
+    };
     if proj.engine != Engine::Postgres {
         eprintln!(
             "pg-studio dump is only supported for PostgreSQL projects ('{}' is {}).",
@@ -491,11 +494,15 @@ fn run_restore_db_command(project: String, file: PathBuf, yes: bool, install: bo
         eprintln!("No project named '{project}'.");
         std::process::exit(1);
     };
-    if config.projects[idx].engine != Engine::Postgres {
+    let Some(proj) = selected_project(&config, idx) else {
+        eprintln!("Selection no longer exists.");
+        std::process::exit(1);
+    };
+    if proj.engine != Engine::Postgres {
         eprintln!(
             "pg-studio restore-db is only supported for PostgreSQL projects ('{}' is {}).",
-            config.projects[idx].name,
-            config.projects[idx].engine.label()
+            proj.name,
+            proj.engine.label()
         );
         std::process::exit(1);
     }
@@ -511,8 +518,6 @@ fn run_restore_db_command(project: String, file: PathBuf, yes: bool, install: bo
         );
         std::process::exit(1);
     }
-
-    let proj = config.projects[idx].clone();
 
     let safety = match pg_studio::dbbackup::safety_backup_path(&file) {
         Ok(p) => p,
@@ -970,7 +975,13 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                     app.mode = AppMode::Normal;
                 }
                 Some(ConfirmationAction::RestoreDatabase) => {
-                    let proj = app.config.projects[app.selected_project_idx].clone();
+                    let Some(proj) = selected_project(&app.config, app.selected_project_idx) else {
+                        app.pending_restore_file = None;
+                        app.confirm_action = None;
+                        app.mode = AppMode::Normal;
+                        app.add_log("Selection no longer exists.".to_string());
+                        return Ok(false);
+                    };
                     let file = app.pending_restore_file.take().unwrap_or_default();
                     app.confirm_action = None;
                     app.mode = AppMode::Normal;
@@ -1148,6 +1159,13 @@ fn find_project_index(config: &AppConfig, name: &str) -> Option<usize> {
                 .iter()
                 .position(|p| p.name.eq_ignore_ascii_case(name))
         })
+}
+
+/// Graceful lookup for an index that may have gone stale between resolution
+/// and use. Returns `None` instead of panicking so callers can report
+/// "selection no longer exists" to the user.
+fn selected_project(config: &AppConfig, idx: usize) -> Option<ProjectConfig> {
+    config.projects.get(idx).cloned()
 }
 
 fn trunc(s: &str, max: usize) -> String {
@@ -1383,7 +1401,10 @@ fn run_test_command(name: String) -> Result<()> {
         eprintln!("No project named '{name}'.");
         std::process::exit(1);
     };
-    let proj = config.projects[idx].clone();
+    let Some(proj) = selected_project(&config, idx) else {
+        eprintln!("Selection no longer exists.");
+        std::process::exit(1);
+    };
     print!("Testing '{}' ... ", proj.name);
     std::io::stdout().flush()?;
     match pg_studio::check::check_connection(&proj) {
@@ -1531,5 +1552,33 @@ mod tests {
         assert_eq!(details_tab_at(area, 11, 9), None);
         assert_eq!(details_tab_at(area, 10, 6), None);
         assert_eq!(details_tab_at(area, 53, 6), None);
+    }
+
+    fn sample_project(name: &str) -> ProjectConfig {
+        ProjectConfig {
+            name: name.to_string(),
+            engine: Engine::Postgres,
+            connection_type: ConnectionType::Local,
+            ssh_connection: String::new(),
+            db_url: String::new(),
+            db_host: String::new(),
+            db_port: String::new(),
+            db_name: String::new(),
+            db_user: String::new(),
+            db_path: String::new(),
+            cf_account_id: String::new(),
+            cf_database_id: String::new(),
+            last_opened: 0,
+        }
+    }
+
+    #[test]
+    fn stale_selection_returns_none() {
+        let mut config = AppConfig::default();
+        assert!(selected_project(&config, 0).is_none());
+        config.projects.push(sample_project("a"));
+        assert_eq!(selected_project(&config, 0).unwrap().name, "a");
+        assert!(selected_project(&config, 1).is_none());
+        assert!(selected_project(&config, usize::MAX).is_none());
     }
 }

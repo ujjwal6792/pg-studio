@@ -206,7 +206,9 @@ pub fn run_dump(
         ConnectionType::Ssh => {
             let tunnel = establish_tunnel(&proj.ssh_connection, &proj.db_port)?;
             let guard = SshTunnelGuard(Some(tunnel));
-            let local_port = guard.port();
+            let local_port = guard
+                .port()
+                .context("SSH tunnel is no longer available for dump")?;
             let args = build_dump_args(
                 pg_dump.to_string_lossy().as_ref(),
                 "127.0.0.1",
@@ -252,8 +254,10 @@ fn verify_dump_output(out: &Path) -> Result<()> {
 pub struct SshTunnelGuard(Option<SshTunnel>);
 
 impl SshTunnelGuard {
-    fn port(&self) -> u16 {
-        self.0.as_ref().expect("guard holds tunnel").local_port
+    /// Local port of the held tunnel, or `None` when no tunnel is held.
+    /// Callers bail with context instead of panicking on `None`.
+    fn port(&self) -> Option<u16> {
+        self.0.as_ref().map(|tunnel| tunnel.local_port)
     }
 }
 
@@ -475,12 +479,15 @@ pub fn run_restore(
         ConnectionType::Ssh => {
             let tunnel = establish_tunnel(&proj.ssh_connection, &proj.db_port)?;
             let guard = SshTunnelGuard(Some(tunnel));
+            let local_port = guard
+                .port()
+                .context("SSH tunnel is no longer available for restore")?;
             let args = build_restore_args(
                 tool,
                 bin.to_string_lossy().as_ref(),
                 &RestoreTarget {
                     host: "127.0.0.1".into(),
-                    port: guard.port(),
+                    port: local_port,
                     user: proj.db_user.clone(),
                     dbname: proj.db_name.clone(),
                     file: backup_file.to_path_buf(),
@@ -613,6 +620,11 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(2048), "2.0 KiB");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MiB");
+    }
+
+    #[test]
+    fn tunnel_guard_without_tunnel_reports_no_port() {
+        assert_eq!(SshTunnelGuard(None).port(), None);
     }
 }
 

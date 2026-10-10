@@ -13,6 +13,13 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 
+/// Fallback for a missing layout chunk: Layout::split always returns one
+/// rect per constraint, so this only triggers on unexpected (e.g. empty)
+/// constraint lists. A zero-area rect renders nothing instead of panicking.
+fn chunk_or_empty(chunks: &[Rect], idx: usize) -> Rect {
+    chunks.get(idx).copied().unwrap_or_default()
+}
+
 /// The app's fixed layout, shared between drawing and mouse hit-testing.
 /// Returns `(header, projects_list, details, logs, footer)`.
 pub fn content_areas(full: Rect) -> (Rect, Rect, Rect, Rect, Rect) {
@@ -28,13 +35,13 @@ pub fn content_areas(full: Rect) -> (Rect, Rect, Rect, Rect, Rect) {
     let content = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(main_chunks[1]);
+        .split(chunk_or_empty(&main_chunks, 1));
     (
-        main_chunks[0],
-        content[0],
-        content[1],
-        main_chunks[2],
-        main_chunks[3],
+        chunk_or_empty(&main_chunks, 0),
+        chunk_or_empty(&content, 0),
+        chunk_or_empty(&content, 1),
+        chunk_or_empty(&main_chunks, 2),
+        chunk_or_empty(&main_chunks, 3),
     )
 }
 
@@ -245,10 +252,11 @@ fn draw_projects_list(f: &mut Frame, app: &mut App, area: Rect) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(inner);
+        let filter_area = chunk_or_empty(&chunks, 0);
         let cursor = if app.mode == AppMode::Filtering {
             Some(Position {
-                x: chunks[0].x + 1 + filter_text.chars().count() as u16,
-                y: chunks[0].y,
+                x: filter_area.x + 1 + filter_text.chars().count() as u16,
+                y: filter_area.y,
             })
         } else {
             None
@@ -257,11 +265,11 @@ fn draw_projects_list(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled("/", Style::default().fg(app.theme.accent)),
             Span::styled(filter_text.clone(), Style::default().fg(app.theme.text)),
         ]);
-        f.render_widget(Paragraph::new(row), chunks[0]);
+        f.render_widget(Paragraph::new(row), filter_area);
         if let Some(pos) = cursor {
             f.set_cursor_position(pos);
         }
-        chunks[1]
+        chunk_or_empty(&chunks, 1)
     } else {
         inner
     };
@@ -292,12 +300,18 @@ fn draw_projects_list(f: &mut Frame, app: &mut App, area: Rect) {
     let viewport_rows = rows_area.height.max(1) as usize;
     app.clamp_project_scroll(viewport_rows);
 
-    let end = (app.project_scroll + viewport_rows).min(visible.len());
-    let lines: Vec<Line> = visible[app.project_scroll..end]
+    let start = app.project_scroll.min(visible.len());
+    let end = (start + viewport_rows).min(visible.len());
+    let lines: Vec<Line> = visible[start..end]
         .iter()
-        .map(|&i| {
-            let p = &app.config.projects[i];
-            project_row(app, i == app.selected_project_idx, inner_width, p)
+        .filter_map(|&i| {
+            let p = app.config.projects.get(i)?;
+            Some(project_row(
+                app,
+                i == app.selected_project_idx,
+                inner_width,
+                p,
+            ))
         })
         .collect();
 
@@ -390,12 +404,18 @@ fn draw_details(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(inner);
 
-    draw_details_subtabs(f, app, chunks[0]);
+    let Some(&tabs_area) = chunks.first() else {
+        return;
+    };
+    let Some(&body_area) = chunks.get(1) else {
+        return;
+    };
+    draw_details_subtabs(f, app, tabs_area);
 
     match app.details_tab {
-        DetailsTab::Overview => draw_overview(f, app, chunks[1]),
-        DetailsTab::Config => draw_config(f, app, chunks[1]),
-        DetailsTab::Process => draw_process(f, app, chunks[1]),
+        DetailsTab::Overview => draw_overview(f, app, body_area),
+        DetailsTab::Config => draw_config(f, app, body_area),
+        DetailsTab::Process => draw_process(f, app, body_area),
     }
 }
 
@@ -433,8 +453,11 @@ fn draw_details_subtabs(f: &mut Frame, app: &App, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style);
-        let inner = block.inner(chunks[i]);
-        f.render_widget(block, chunks[i]);
+        let Some(&cell) = chunks.get(i) else {
+            continue;
+        };
+        let inner = block.inner(cell);
+        f.render_widget(block, cell);
         let tab_widget =
             Paragraph::new(Span::styled(*label, text_style)).alignment(Alignment::Center);
         f.render_widget(tab_widget, inner);
@@ -453,7 +476,16 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let proj = &app.config.projects[app.selected_project_idx];
+    let Some(proj) = app.config.projects.get(app.selected_project_idx) else {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "No project selected.",
+                Style::default().fg(app.theme.muted),
+            )),
+            area,
+        );
+        return;
+    };
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             format!(" Name              : {}", proj.name),
@@ -1136,7 +1168,9 @@ fn fit_footer_items(items: &[(&str, &str)], theme: &Theme, avail: u16) -> Vec<Sp
     let item_w = |item: &(&str, &str)| item.0.chars().count() + 1 + item.1.chars().count();
 
     let (head, tail) = items.split_at(items.len() - 1);
-    let help = tail[0];
+    let Some(&help) = tail.first() else {
+        return Vec::new();
+    };
     let help_w = SEP_W + item_w(&help);
 
     // Space available for head items once room for Help is reserved.
@@ -1209,22 +1243,31 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
             "⏹",
         ),
         ConfirmationAction::MissingPgDump => {
-            let pm = app
-                .pending_pkg_manager
-                .expect("MissingPgDump requires a detected manager");
+            let (manager_name, install_cmd) = match app.pending_pkg_manager {
+                Some(pm) => (
+                    pm.name().to_string(),
+                    crate::installer::suggest_command(pm),
+                ),
+                None => ("unknown package manager".to_string(), String::new()),
+            };
             (
                 " Install pg_dump ",
                 format!(
-                    "pg_dump is not installed. Install it now via {}?\n\n$ {}",
-                    pm.name(),
-                    crate::installer::suggest_command(pm)
+                    "pg_dump is not installed. Install it now via {manager_name}?\n\n$ {install_cmd}"
                 ),
                 app.theme.accent,
                 "󰏗",
             )
         }
         ConfirmationAction::RestoreDatabase => {
-            let proj = &app.config.projects[app.selected_project_idx];
+            let (project_name, db_name) = app
+                .config
+                .projects
+                .get(app.selected_project_idx)
+                .map(|p| (p.name.clone(), p.db_name.clone()))
+                .unwrap_or_else(|| {
+                    ("unknown project".to_string(), "unknown database".to_string())
+                });
             let file = app
                 .pending_restore_file
                 .as_ref()
@@ -1237,7 +1280,7 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
                 " Restore Database ",
                 format!(
                     "Overwrite database '{}' of project '{}' with:\n{}\n\nObjects will be dropped and replaced. A safety backup\nwill be taken first and kept at:\n{}",
-                    proj.db_name, proj.name, file, safety
+                    db_name, project_name, file, safety
                 ),
                 app.theme.error,
                 "⚠",
@@ -1485,7 +1528,7 @@ fn render_help_popup(f: &mut Frame, app: &mut App) {
     }
     app.help_scroll = app.help_scroll.min(rows.len().saturating_sub(height));
 
-    let start = app.help_scroll;
+    let start = app.help_scroll.min(rows.len());
     let end = (start + height).min(rows.len());
     let visible: Vec<Line> = rows[start..end]
         .iter()
@@ -1511,7 +1554,10 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage(percent_x),
             Constraint::Percentage((100 - percent_x) / 2),
         ])
-        .split(popup_layout[1])[1]
+        .split(chunk_or_empty(&popup_layout, 1))
+        .get(1)
+        .copied()
+        .unwrap_or(r)
 }
 
 #[cfg(test)]
@@ -1586,5 +1632,37 @@ mod tests {
         let spans = fit_footer_items(&items, &theme, 200);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("[["));
+    }
+
+    #[test]
+    fn chunk_fallback_returns_empty_rect_for_missing_index() {
+        assert_eq!(chunk_or_empty(&[], 0), Rect::default());
+        assert_eq!(chunk_or_empty(&[Rect::new(1, 2, 3, 4)], 5), Rect::default());
+        assert_eq!(
+            chunk_or_empty(&[Rect::new(1, 2, 3, 4)], 0),
+            Rect::new(1, 2, 3, 4)
+        );
+    }
+
+    #[test]
+    fn content_areas_partitions_full_rect() {
+        let full = Rect::new(0, 0, 100, 30);
+        let (header, list, details, logs, footer) = content_areas(full);
+        // Header + content + logs + footer heights cover the full height.
+        assert_eq!(
+            header.height + (list.height.max(details.height)) + logs.height + footer.height,
+            full.height
+        );
+        assert_eq!(header.width, full.width);
+        assert_eq!(footer.width, full.width);
+        // List + details sit side by side inside the content band.
+        assert_eq!(list.height, details.height);
+        assert_eq!(list.y, header.height);
+    }
+
+    #[test]
+    fn footer_handles_empty_items_without_panic() {
+        let theme = Theme::default();
+        assert!(fit_footer_items(&[], &theme, 80).is_empty());
     }
 }
