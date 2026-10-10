@@ -95,9 +95,10 @@ fn render_update_popup(f: &mut Frame, app: &App) {
         % FRAMES.len()];
 
     let (phase_text, phase_color) = match phase {
-        Some(crate::updater::UpdatePhase::Checking) => {
-            ("Checking GitHub Releases...".to_string(), app.theme.info)
-        }
+        Some(crate::updater::UpdatePhase::Checking) => (
+            crate::updater::UpdatePhase::Checking.label().to_string(),
+            app.theme.info,
+        ),
         _ => (
             format!("Downloading & installing update {note}..."),
             app.theme.warn,
@@ -221,7 +222,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             ]))
             .title(
                 Line::from(vec![Span::styled(
-                    format!(" v{} ", env!("CARGO_PKG_VERSION")),
+                    format!(
+                        " {} ",
+                        crate::updater::format_version(env!("CARGO_PKG_VERSION"))
+                    ),
                     Style::default().fg(app.theme.info),
                 )])
                 .right_aligned(),
