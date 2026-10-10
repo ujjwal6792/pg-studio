@@ -51,13 +51,22 @@ an SSH tunnel, `pg-studio` handles the entire lifecycle for you.
 
 ## Installation 📦
 
-### Option 1: Install Pre-compiled Binary (Apple Silicon Mac)
+### Option 1: Install Pre-compiled Binary
 
 Download and install the latest pre-compiled binary directly from
-[GitHub Releases](https://github.com/ujjwal6792/pg-studio/releases):
+[GitHub Releases](https://github.com/ujjwal6792/pg-studio/releases)
+(pick the archive for your platform):
 
 ```bash
-curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.2.0-beta.2-aarch64-apple-darwin.tar.gz | tar -xz
+# Apple Silicon Mac
+curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.5.3-aarch64-apple-darwin.tar.gz | tar -xz
+# Intel Mac
+curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.5.3-x86_64-apple-darwin.tar.gz | tar -xz
+# Linux (x86_64)
+curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.5.3-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+# Windows (x86_64, PowerShell): download and extract
+# pg-studio-v0.5.3-x86_64-pc-windows-msvc.tar.gz, then move pg-studio.exe
+# somewhere on your PATH.
 sudo mv pg-studio /usr/local/bin/
 ```
 
@@ -66,7 +75,7 @@ sudo mv pg-studio /usr/local/bin/
 To build and install a specific tagged release directly via Cargo:
 
 ```bash
-cargo install --git https://github.com/ujjwal6792/pg-studio --tag v0.2.0-beta.2 --force
+cargo install --git https://github.com/ujjwal6792/pg-studio --tag v0.5.3 --force
 ```
 
 Or install the latest edge version straight from the `main` branch:
@@ -78,7 +87,7 @@ cargo install --git https://github.com/ujjwal6792/pg-studio --force
 ### Option 3: Install via Crates.io (When published)
 
 ```bash
-cargo install pg-studio --version 0.2.0-beta.2
+cargo install pg-studio --version 0.5.3
 ```
 
 ## Prerequisites

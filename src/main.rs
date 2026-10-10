@@ -12,7 +12,7 @@ use pg_studio::{
     theme,
     tui::Tui,
     ui::{content_areas, draw},
-    updater::check_for_update,
+    updater::{check_for_update, format_version},
 };
 use ratatui::layout::Rect;
 use std::io::Write as _;
@@ -209,7 +209,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.version {
-        println!("pg-studio {}", env!("CARGO_PKG_VERSION"));
+        println!("pg-studio {}", format_version(env!("CARGO_PKG_VERSION")));
         return Ok(());
     }
 
@@ -222,7 +222,7 @@ fn main() -> Result<()> {
                 let note = if version.is_empty() {
                     String::new()
                 } else {
-                    format!(" (v{version})")
+                    format!(" ({})", format_version(version))
                 };
                 spinner.set_message(format!("{}{note}", phase.label()));
             },
@@ -240,7 +240,8 @@ fn main() -> Result<()> {
     }
 
     if cli.check {
-        let mut spinner = pg_studio::spinner::Spinner::start("Checking GitHub Releases...");
+        let mut spinner =
+            pg_studio::spinner::Spinner::start(pg_studio::updater::UpdatePhase::Checking.label());
         let result = check_for_update();
         spinner.finish();
         match result {

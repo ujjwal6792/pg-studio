@@ -1941,7 +1941,7 @@ impl App {
                         *p = phase;
                     }
                     if let Ok(mut n) = tracker.note.lock() {
-                        *n = format!("v{note}");
+                        *n = crate::updater::format_version(note);
                     }
                 },
                 &tracker.cancel,
