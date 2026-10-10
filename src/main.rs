@@ -8,6 +8,7 @@ use pg_studio::{
     backup,
     config::{AppConfig, ConnectionType, Engine, ProjectConfig},
     open::{copy_to_clipboard, open_url},
+    project_filter::ProjectFilter,
     theme,
     tui::Tui,
     ui::{content_areas, draw},
@@ -1149,16 +1150,7 @@ fn do_import(app: &mut App) {
 }
 
 fn find_project_index(config: &AppConfig, name: &str) -> Option<usize> {
-    config
-        .projects
-        .iter()
-        .position(|p| p.name == name)
-        .or_else(|| {
-            config
-                .projects
-                .iter()
-                .position(|p| p.name.eq_ignore_ascii_case(name))
-        })
+    ProjectFilter::find_project_index(&config.projects, name)
 }
 
 /// Graceful lookup for an index that may have gone stale between resolution
@@ -1183,7 +1175,7 @@ fn run_list_command() -> Result<()> {
         println!("No projects configured. Launch the TUI and press 'n' to add one.");
         return Ok(());
     }
-    let running: Vec<String> = pg_studio::persist::load()
+    let running: std::collections::HashSet<String> = pg_studio::persist::load()
         .into_iter()
         .map(|s| s.project_name)
         .collect();
