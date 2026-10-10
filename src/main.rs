@@ -69,8 +69,22 @@ struct Cli {
     #[arg(short = 'v', long = "version", visible_short_alias = 'V')]
     version: bool,
 
+    /// Color theme for the TUI; also becomes the saved default.
+    /// See the list below (press Shift+T inside the TUI to choose).
+    #[arg(
+        long,
+        value_name = "THEME",
+        value_parser = clap::builder::PossibleValuesParser::new(theme_choices())
+    )]
+    theme: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+/// Theme names accepted by `--theme`, in cycle order.
+fn theme_choices() -> Vec<&'static str> {
+    theme::ThemeKind::ALL.iter().map(|k| k.id()).collect()
 }
 
 /// Arguments for `pg-studio new`.
@@ -262,7 +276,9 @@ fn main() -> Result<()> {
     let mut tui = Tui::new()?;
     tui.enter()?;
 
-    app.theme = theme::query_terminal_theme().unwrap_or_default();
+    // --theme wins and is saved; otherwise the saved theme (or the terminal
+    // palette, when none is saved) applies.
+    app.apply_theme_choice(cli.theme.as_deref());
 
     let res = run_app(&mut tui, &mut app);
 
@@ -787,6 +803,16 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         app.cancel_update();
         return Ok(false);
     }
+    // Terminals differ on whether Shift+T arrives as `Char('T')` or
+    // `Char('t')` plus SHIFT. Check the modifier before matching the code so
+    // either representation wins over the lowercase `t` connection test.
+    if key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char('t' | 'T'))
+        && app.mode == AppMode::Normal
+    {
+        app.open_theme_picker();
+        return Ok(false);
+    }
     match app.mode {
         AppMode::Normal => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -843,6 +869,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
             KeyCode::Char('u') => {
                 app.start_update();
             }
+            KeyCode::Char('g') => app.toggle_background(),
             KeyCode::Up | KeyCode::Char('k') if app.active_pane == ActivePane::ProjectsList => {
                 app.move_selection(-1);
             }
@@ -954,6 +981,14 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
             _ => {
                 app.input_backup_path.handle_event(&Event::Key(key));
             }
+        },
+
+        AppMode::ThemePicker => match key.code {
+            KeyCode::Esc => app.cancel_theme_picker(),
+            KeyCode::Up | KeyCode::Char('k') => app.move_theme_picker(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.move_theme_picker(1),
+            KeyCode::Enter => app.confirm_theme_picker(),
+            _ => {}
         },
 
         AppMode::ConfirmDialog => match key.code {
@@ -1120,6 +1155,7 @@ fn execute_help_action(app: &mut App, action: HelpAction) -> Result<bool> {
         ExportProjects => do_export(app),
         ImportProjects => do_import(app),
         UpdateApp => app.start_update(),
+        OpenThemePicker => app.open_theme_picker(),
         ScrollLogsUp => app.scroll_logs(-10),
         ScrollLogsDown => app.scroll_logs(10),
         CloseHelp => app.mode = AppMode::Normal,
@@ -1573,5 +1609,21 @@ mod tests {
         assert_eq!(selected_project(&config, 0).unwrap().name, "a");
         assert!(selected_project(&config, 1).is_none());
         assert!(selected_project(&config, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn shift_t_opens_theme_picker_without_testing_connection() {
+        let mut app = App::for_test();
+        app.config.projects.push(sample_project("demo"));
+
+        handle_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(KeyCode::Char('t'), KeyModifiers::SHIFT),
+        )
+        .unwrap();
+
+        assert_eq!(app.mode, AppMode::ThemePicker);
+        assert!(app.error_message.is_none(), "Shift+T should not test DB");
+        assert_eq!(app.theme_kind(), theme::ThemeKind::Terminal);
     }
 }

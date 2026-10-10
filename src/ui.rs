@@ -66,8 +66,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.mode == AppMode::BackupMenu {
         render_backup_menu(f, app);
     }
+    if app.mode == AppMode::ThemePicker {
+        render_theme_picker(f, app);
+    }
     if app.update_in_progress() {
         render_update_popup(f, app);
+    }
+
+    // Widgets write `Reset` backgrounds for blank cells. Fill those cells
+    // last; explicit highlights, scrims and popup surfaces remain untouched.
+    if app.config.background {
+        let bg = app.theme.bg;
+        let area = f.area();
+        let buffer = f.buffer_mut();
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let cell = &mut buffer[(x, y)];
+                if cell.bg == Color::Reset {
+                    cell.bg = bg;
+                }
+            }
+        }
     }
 }
 
@@ -201,6 +220,58 @@ fn render_backup_menu(f: &mut Frame, app: &App) {
         x: col,
         y: path_row_y,
     });
+}
+
+/// Theme chooser with live preview; Enter saves and Esc restores the prior
+/// theme. The list scrolls so the full catalog fits small terminals.
+fn render_theme_picker(f: &mut Frame, app: &App) {
+    use crate::theme::ThemeKind;
+
+    const H_PAD: u16 = 2;
+    let width = 50u16.min(f.area().width.saturating_sub(2));
+    let height = (ThemeKind::ALL.len() as u16 + 4).min(f.area().height.saturating_sub(2));
+    let area = centered_rect_fixed(width, height, f.area());
+    let inner_height = height.saturating_sub(4) as usize;
+    let start = app
+        .theme_picker_idx
+        .saturating_sub(inner_height.saturating_sub(1));
+    let end = (start + inner_height).min(ThemeKind::ALL.len());
+
+    let mut lines = Vec::new();
+    for (index, kind) in ThemeKind::ALL
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+    {
+        let selected = index == app.theme_picker_idx;
+        let marker = if selected { "▶ " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(app.theme.on_highlight)
+                .bg(app.theme.highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{}", kind.label()),
+            style,
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        " ↑/↓ Preview · Enter Save · Esc Cancel",
+        Style::default().fg(app.theme.muted),
+    )));
+
+    let block = Block::default()
+        .title(" Color Theme ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.accent))
+        .padding(Padding::horizontal(H_PAD));
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -344,13 +415,21 @@ fn project_row(app: &App, selected: bool, inner_width: usize, p: &ProjectConfig)
         }
     };
 
-    let bg = if selected && focused {
-        app.theme.highlight_bg
-    } else if selected {
-        app.theme.muted
+    // A selected row swaps its whole surface, so the row stays readable
+    // whether or not the pane has focus. The theme guarantees the contrast;
+    // this code just picks which surface applies.
+    let (bg, on_bg) = if selected {
+        let bg = if focused {
+            app.theme.highlight_bg
+        } else {
+            app.theme.selected_bg
+        };
+        (bg, Some(app.theme.on_highlight))
     } else {
-        Color::Reset
+        (Color::Reset, None)
     };
+    let marker_color = on_bg.unwrap_or(marker_color);
+    let name_color = on_bg.unwrap_or(name_color);
 
     let icon = engine_icon(p.engine, Some(p.connection_type));
 
@@ -1146,6 +1225,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 ("s", "Stop"),
                 ("o/c", "URL"),
                 ("Pg↑/↓", "Logs"),
+                ("T", "Theme"),
+                ("g", "Background"),
                 ("q", "Quit"),
                 ("?", "Help"),
             ],
@@ -1160,6 +1241,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 ("s", "Stop"),
                 ("o/c", "URL"),
                 ("l", "Copy logs"),
+                ("T", "Theme"),
+                ("g", "Background"),
                 ("q", "Quit"),
                 ("?", "Help"),
             ],
@@ -1177,6 +1260,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             ("Esc", "Clear"),
         ],
         AppMode::BackupMenu => vec![("↑/↓", "Action"), ("⏎", "Run"), ("Esc", "Close")],
+        AppMode::ThemePicker => vec![("↑/↓", "Preview"), ("⏎", "Save"), ("Esc", "Cancel")],
         AppMode::ConfirmDialog => vec![("⏎/y", "Confirm"), ("Esc/n", "Cancel")],
         AppMode::Help => vec![("Esc/?/q", "Close")],
     };
@@ -1405,15 +1489,15 @@ fn render_confirm_popup(f: &mut Frame, app: &App, action: ConfirmationAction) {
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme_color))
-        .style(Style::default().bg(Color::Rgb(0x17, 0x12, 0x12)))
         .padding(Padding::new(H_PAD, H_PAD, V_PAD, V_PAD));
 
     let paragraph = Paragraph::new(popup_text)
         .alignment(Alignment::Center)
         .block(popup_block);
 
-    // Dim the background behind the popup
-    let overlay = Block::default().style(Style::default().bg(Color::Rgb(0x17, 0x12, 0x12)));
+    // Dim the background behind the popup, travelling away from the theme's
+    // own background so the popup keeps its lift on light terminals too.
+    let overlay = Block::default().style(Style::default().bg(app.theme.scrim));
     f.render_widget(overlay, term);
     f.render_widget(Clear, area);
     f.render_widget(paragraph, area);
@@ -1498,7 +1582,7 @@ fn render_help_popup(f: &mut Frame, app: &mut App) {
             (
                 format!(">{:<width$}", entry.key, width = KEY_COL - 1),
                 Style::default()
-                    .fg(app.theme.warn)
+                    .fg(app.theme.on_highlight)
                     .add_modifier(Modifier::BOLD)
                     .bg(app.theme.highlight_bg),
             )
@@ -1510,7 +1594,7 @@ fn render_help_popup(f: &mut Frame, app: &mut App) {
         };
         let base_desc_style = if selected {
             Style::default()
-                .fg(app.theme.text)
+                .fg(app.theme.on_highlight)
                 .bg(app.theme.highlight_bg)
         } else {
             Style::default().fg(app.theme.text)
@@ -1698,5 +1782,96 @@ mod tests {
     fn footer_handles_empty_items_without_panic() {
         let theme = Theme::default();
         assert!(fit_footer_items(&[], &theme, 80).is_empty());
+    }
+
+    /// Renders real frames for every theme in three modes, then walks every
+    /// cell: anything drawn on a background must have a readable foreground
+    /// on top of it. This is the guard against pairing theme colors ad hoc
+    /// in the UI (the selected row and the popup scrim both regressed here).
+    #[test]
+    fn every_theme_renders_readable_cells() {
+        use crate::theme::ThemeKind;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let project = ProjectConfig {
+            name: "demo".into(),
+            engine: Engine::Postgres,
+            connection_type: ConnectionType::Local,
+            ssh_connection: String::new(),
+            db_url: String::new(),
+            db_host: "localhost".into(),
+            db_port: "5432".into(),
+            db_name: "postgres".into(),
+            db_user: "postgres".into(),
+            db_path: String::new(),
+            cf_account_id: String::new(),
+            cf_database_id: String::new(),
+            last_opened: 0,
+        };
+
+        let mut app = App::for_test();
+        app.config.projects.push(project);
+        app.selected_project_idx = 0;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        for kind in ThemeKind::ALL {
+            if kind == ThemeKind::Terminal {
+                continue; // ambient: needs terminal I/O, covered by parse tests
+            }
+            app.theme = Theme::of(kind);
+
+            // The list with a selected row, the confirm popup over its scrim,
+            // and the keybindings popup with a highlighted entry.
+            let frames = [
+                (AppMode::Normal, None),
+                (AppMode::ConfirmDialog, Some(ConfirmationAction::Quit)),
+                (AppMode::Help, None),
+            ];
+            for (mode, action) in frames {
+                app.mode = mode;
+                app.confirm_action = action;
+                terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+                let buffer = terminal.backend().buffer();
+                for y in 0..buffer.area.height {
+                    for x in 0..buffer.area.width {
+                        let cell = &buffer[(x, y)];
+                        if cell.symbol() == " " || cell.bg == Color::Reset {
+                            continue;
+                        }
+                        let ratio = crate::color::contrast_ratio(cell.fg, cell.bg);
+                        assert!(
+                            ratio >= 3.0,
+                            "{kind:?} in {mode:?}: {:?} at ({x},{y}) is {ratio:.1}:1 on its background",
+                            cell.symbol()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn themed_background_fills_empty_cells_and_can_be_disabled() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut app = App::for_test();
+        app.theme = Theme::of(crate::theme::ThemeKind::CatppuccinLatte);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(99, 29)].bg,
+            app.theme.bg,
+            "background should fill otherwise untouched frame cells"
+        );
+
+        app.config.background = false;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(99, 29)].bg,
+            Color::Reset,
+            "disabled background should leave terminal cells transparent"
+        );
     }
 }

@@ -1,6 +1,7 @@
 pub mod app;
 pub mod backup;
 pub mod check;
+pub mod color;
 pub mod config;
 pub mod dbbackup;
 pub mod drizzle;

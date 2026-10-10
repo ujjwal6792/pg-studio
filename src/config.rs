@@ -5,10 +5,34 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     #[serde(default)]
     pub projects: Vec<ProjectConfig>,
+
+    /// Selected TUI color theme by name; absent follows the terminal's own
+    /// palette. See `pg_studio::theme::ThemeKind` for the accepted names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+
+    /// Whether the TUI paints the selected theme's background instead of
+    /// leaving the terminal background transparent. Defaults to enabled.
+    #[serde(default = "default_true")]
+    pub background: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            projects: Vec::new(),
+            theme: None,
+            background: true,
+        }
+    }
 }
 
 /// Which database engine/provider a project talks to. `ConnectionType` stays
@@ -471,7 +495,11 @@ pub(crate) fn expand_tilde(input: &str) -> PathBuf {
 impl AppConfig {
     #[cfg(test)]
     pub(crate) fn with_projects(projects: Vec<ProjectConfig>) -> Self {
-        Self { projects }
+        Self {
+            projects,
+            theme: None,
+            background: true,
+        }
     }
     pub fn load() -> Result<Self> {
         let config_path = Self::config_file_path()?;
@@ -639,6 +667,50 @@ mod tests {
         assert!(toml_str.contains("connection_type = \"local\""));
         let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.projects[0].connection_type, ConnectionType::Local);
+    }
+
+    #[test]
+    fn theme_round_trips_and_is_omitted_when_unset() {
+        let project = ProjectConfig {
+            name: "local-dev".into(),
+            engine: Engine::Postgres,
+            connection_type: ConnectionType::Local,
+            ssh_connection: String::new(),
+            db_url: String::new(),
+            db_host: "localhost".into(),
+            db_port: "5432".into(),
+            db_name: "postgres".into(),
+            db_user: "postgres".into(),
+            db_path: String::new(),
+            cf_account_id: String::new(),
+            cf_database_id: String::new(),
+            last_opened: 0,
+        };
+        let mut config = AppConfig::with_projects(vec![project]);
+        let toml_str = toml::to_string(&config).unwrap();
+        // Following the terminal is the default: nothing is written.
+        assert!(!toml_str.contains("theme"));
+
+        config.theme = Some("catppuccin-mocha".into());
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("theme = \"catppuccin-mocha\""));
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.theme.as_deref(), Some("catppuccin-mocha"));
+    }
+
+    #[test]
+    fn background_defaults_on_and_persists_when_disabled() {
+        let legacy: AppConfig = toml::from_str("projects = []\n").unwrap();
+        assert!(legacy.background);
+
+        let config = AppConfig {
+            background: false,
+            ..AppConfig::default()
+        };
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("background = false"));
+        let parsed: AppConfig = toml::from_str(&serialized).unwrap();
+        assert!(!parsed.background);
     }
 
     #[test]

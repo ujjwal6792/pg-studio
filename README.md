@@ -48,6 +48,11 @@ an SSH tunnel, `pg-studio` handles the entire lifecycle for you.
   database via `pg_dump` (custom `.dump` or plain `.sql`), and restore a backup
   into a project's database (`restore-db`). Restores always take a fresh safety
   backup of the target database first and keep it even if the restore fails.
+- **25 Themes, Always Readable**: Catppuccin, Tokyo Night, Dracula, Gruvbox,
+  Nord, Solarized, One Dark, GitHub, Rosé Pine, Everforest, Kanagawa, Monokai —
+  switch with `--theme` or the `T` key. Every color is contrast-checked against
+  the theme's own background, so text, selected rows and popups stay readable
+  on dark *and* light terminals (and on your terminal's own palette).
 
 ## Installation 📦
 
@@ -129,6 +134,26 @@ pg-studio
   (PostgreSQL projects only).
 - **`pg-studio --version` / `-v` / `-V`**: Print the current version.
 - **`pg-studio --help` / `-h`**: Print usage help.
+- **`pg-studio --theme <NAME>`**: Pick a TUI color theme and save it as the
+  default (see [Themes](#themes-) below).
+
+### Themes 🎨
+
+pg-studio ships 25 themes — Catppuccin (Mocha, Latte, Frappé, Macchiato),
+Tokyo Night (Night, Storm, Light), Dracula, Gruvbox (Dark/Light), Nord,
+Solarized (Dark/Light), One Dark, GitHub (Dark/Light), Rosé Pine (Pine,
+Moon, Dawn), Everforest (Dark/Light), Kanagawa and Monokai — plus
+`terminal`, which follows the colors of your own terminal (detected via
+OSC 10/11/4). Every theme is contrast-checked against its own background,
+so text, status colors, selected rows and popups stay readable on both dark
+and light terminals.
+
+```bash
+pg-studio --theme catppuccin-mocha   # switch and remember
+pg-studio --theme terminal          # go back to following your terminal
+```
+
+Run `pg-studio --help` for the full list of theme names.
 
 ### Keyboard Navigation in TUI:
 
@@ -143,6 +168,10 @@ pg-studio
   - On Project Form: **Save Project**.
 - **`u`**: **Self-Update** (fetches & installs the latest GitHub binary
   release).
+- **`Shift+T`**: **Choose a Color Theme**. Up/Down previews, Enter saves, and
+  Esc cancels and restores the previous theme.
+- **`g`**: **Toggle the theme background** on/off. The choice is saved in the
+  config file; background fill is on by default.
 - **`q` / `Esc`**: **Quit** (with confirmation modal).
 
 ## License

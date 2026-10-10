@@ -9,7 +9,7 @@ use crate::project_filter::ProjectFilter;
 use crate::session::{RunningSession, SessionStatus};
 use crate::session_registry::SessionRegistry;
 use crate::ssh::{establish_tunnel, find_free_port};
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeKind};
 use anyhow::{Result, anyhow};
 use chrono::{Local, TimeZone};
 use std::path::PathBuf;
@@ -48,6 +48,8 @@ pub enum AppMode {
     Filtering,
     /// Backup / restore / dump menu ('b').
     BackupMenu,
+    /// Select and preview a theme ('Shift+T').
+    ThemePicker,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -94,6 +96,8 @@ pub enum HelpAction {
     ScrollLogsUp,
     ScrollLogsDown,
     CloseHelp,
+    /// Open the theme picker.
+    OpenThemePicker,
 }
 
 /// One row of the keybindings screen; headers are group titles.
@@ -227,6 +231,8 @@ pub fn help_entries() -> Vec<HelpEntry> {
             Some(ImportProjects),
         ),
         e("u", "Self-update pg-studio", Some(UpdateApp)),
+        e("Shift+T", "Choose a color theme", Some(OpenThemePicker)),
+        e("g", "Toggle theme background on/off", None),
         e(
             "q",
             "Quit (running studios keep running in background)",
@@ -447,6 +453,10 @@ pub struct App {
     pub logs: Arc<Mutex<LogBuffer>>,
     pub sessions: SessionRegistry,
     pub theme: Theme,
+    /// Currently highlighted theme in the picker.
+    pub theme_picker_idx: usize,
+    /// Theme to restore if the picker is dismissed with Esc.
+    pub theme_picker_original: Option<Theme>,
 }
 
 impl App {
@@ -527,6 +537,8 @@ impl App {
             logs: Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP))),
             sessions: SessionRegistry::new(),
             theme: Theme::default(),
+            theme_picker_idx: 0,
+            theme_picker_original: None,
         };
 
         app.load_selected_into_form();
@@ -542,6 +554,60 @@ impl App {
     pub fn add_log(&self, msg: String) {
         if let Ok(mut logs) = self.logs.lock() {
             logs.push(msg);
+        }
+    }
+
+    /// Test-only constructor: view state only. [`App::new`] loads the real
+    /// config and re-attaches (or kills) detached sessions, which tests must
+    /// never do.
+    pub fn for_test() -> Self {
+        Self {
+            config: AppConfig::default(),
+            selected_project_idx: 0,
+            active_pane: ActivePane::ProjectsList,
+            details_tab: DetailsTab::Overview,
+            mode: AppMode::Normal,
+            confirm_action: None,
+
+            project_scroll: 0,
+            filter: Input::default(),
+            project_filter: ProjectFilter::new(),
+            log_scroll: 0,
+
+            backup_menu_idx: 0,
+            input_backup_path: Input::default(),
+            pending_pkg_manager: None,
+            pending_restore_file: None,
+            update_tracker: None,
+
+            help_selected: 0,
+            help_scroll: 0,
+
+            jobs: Vec::new(),
+
+            input_name: Input::default(),
+            input_ssh: Input::default(),
+            input_url: Input::default(),
+            input_host: Input::default(),
+            input_port: Input::default(),
+            input_dbname: Input::default(),
+            input_dbuser: Input::default(),
+            input_dbpass: Input::default(),
+            input_dbpath: Input::default(),
+            input_cf_account: Input::default(),
+            input_cf_database: Input::default(),
+            engine: Engine::Postgres,
+            connection_type: ConnectionType::Ssh,
+            active_field: FormField::Name,
+
+            is_new_project: false,
+            status_message: String::new(),
+            error_message: None,
+            logs: Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP))),
+            sessions: SessionRegistry::new(),
+            theme: Theme::default(),
+            theme_picker_idx: 0,
+            theme_picker_original: None,
         }
     }
 
@@ -985,6 +1051,111 @@ impl App {
     }
 
     // --- Keybindings screen end ---
+
+    // --- Themes ---
+
+    /// Adopts the theme for a new TUI session. An explicit `--theme` name
+    /// wins and is saved as the new default; otherwise the configured theme
+    /// applies, and an absent config follows the terminal's own palette.
+    pub fn apply_theme_choice(&mut self, cli_theme: Option<&str>) {
+        let Some(name) = cli_theme else {
+            let (theme, warning) = crate::theme::resolve(self.config.theme.as_deref());
+            self.theme = theme;
+            if let Some(msg) = warning {
+                self.add_log(msg);
+            }
+            return;
+        };
+        if let Err(e) = self.set_theme(name) {
+            self.add_log(format!("{e:#}"));
+        }
+    }
+
+    /// Switches to the named theme, persisting the choice for future runs.
+    pub fn set_theme(&mut self, name: &str) -> Result<()> {
+        let kind: ThemeKind = name.parse()?;
+        self.config.theme = Some(kind.id().to_string());
+        self.config.save()?;
+        self.theme = Theme::of(kind);
+        self.add_log(format!("Theme: {} (saved)", kind.label()));
+        Ok(())
+    }
+
+    /// Opens the picker with the current theme highlighted and previewed.
+    pub fn open_theme_picker(&mut self) {
+        self.theme_picker_original = Some(self.theme);
+        self.theme_picker_idx = ThemeKind::ALL
+            .iter()
+            .position(|kind| *kind == self.theme_kind())
+            .unwrap_or(0);
+        self.preview_theme();
+        self.mode = AppMode::ThemePicker;
+    }
+
+    /// Moves the picker selection, previewing the new theme immediately.
+    pub fn move_theme_picker(&mut self, delta: isize) {
+        let current = self.theme_picker_idx as isize;
+        self.theme_picker_idx =
+            (current + delta).rem_euclid(ThemeKind::ALL.len() as isize) as usize;
+        self.preview_theme();
+    }
+
+    /// Persists the currently previewed theme and closes the picker.
+    pub fn confirm_theme_picker(&mut self) {
+        let kind = ThemeKind::ALL[self.theme_picker_idx];
+        if let Err(e) = self.set_theme(kind.id()) {
+            self.add_log(format!("{e:#}"));
+            self.cancel_theme_picker();
+            return;
+        }
+        self.theme_picker_original = None;
+        self.mode = AppMode::Normal;
+    }
+
+    /// Closes the picker and restores the theme that was active on entry.
+    pub fn cancel_theme_picker(&mut self) {
+        if let Some(original) = self.theme_picker_original.take() {
+            self.theme = original;
+        }
+        self.mode = AppMode::Normal;
+    }
+
+    fn preview_theme(&mut self) {
+        let kind = ThemeKind::ALL[self.theme_picker_idx];
+        self.theme = if kind == ThemeKind::Terminal {
+            self.theme_picker_original.unwrap_or_default()
+        } else {
+            Theme::of(kind)
+        };
+    }
+
+    /// Theme currently in effect, by name (`terminal` when following the
+    /// terminal's palette).
+    pub fn theme_kind(&self) -> ThemeKind {
+        self.config
+            .theme
+            .as_deref()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(ThemeKind::Terminal)
+    }
+
+    /// Toggles painting the selected theme's background, persisting the
+    /// choice. A failed write leaves the in-memory setting unchanged.
+    pub fn toggle_background(&mut self) {
+        let next = !self.config.background;
+        self.config.background = next;
+        if let Err(e) = self.config.save() {
+            self.config.background = !next;
+            self.add_log(format!("Could not save background setting: {e:#}"));
+            return;
+        }
+        self.add_log(format!(
+            "Theme background {} (saved)",
+            if next { "on" } else { "off" }
+        ));
+    }
+
+    // --- Themes end ---
 
     // --- Backup menu ('b') ---
     pub fn backup_menu_items() -> &'static [&'static str] {
@@ -2323,6 +2494,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn theme_picker_previews_then_cancel_restores_original() {
+        let mut app = App::for_test();
+        app.config.theme = Some("default".into());
+        app.theme = Theme::of(ThemeKind::Default);
+
+        app.open_theme_picker();
+        assert_eq!(app.mode, AppMode::ThemePicker);
+        assert_eq!(app.theme_picker_idx, 1);
+        app.move_theme_picker(1);
+        assert_eq!(app.theme_kind(), ThemeKind::Default); // preview doesn't persist
+        assert_ne!(app.theme.bg, Theme::of(ThemeKind::Default).bg);
+
+        app.cancel_theme_picker();
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.config.theme.as_deref(), Some("default"));
+        assert_eq!(app.theme.bg, Theme::of(ThemeKind::Default).bg);
+    }
+
+    #[test]
     fn ssh_field_order_skips_url_only_fields() {
         let order = FormField::order(Engine::Postgres, ConnectionType::Ssh);
         assert!(!order.contains(&FormField::DbUrl));
@@ -2439,6 +2629,8 @@ mod tests {
             logs: Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP))),
             sessions: SessionRegistry::new(),
             theme: Theme::default(),
+            theme_picker_idx: 0,
+            theme_picker_original: None,
         }
     }
 
