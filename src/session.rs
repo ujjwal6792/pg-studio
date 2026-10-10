@@ -33,23 +33,20 @@ pub struct RunningSession {
 
 impl RunningSession {
     fn terminate_processes(&mut self) {
-        #[cfg(unix)]
-        if let Some(pid) = self.studio_pid {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
+        use crate::process::{TERM_GRACE, terminate_child, terminate_pid};
+        // Prefer the owned handle: it reaps (no zombie) and cannot hit a
+        // reused PID. Fall back to signalling by pid for detached sessions
+        // whose handle was left behind at shutdown.
+        if let Some(mut child) = self.studio_child.take() {
+            terminate_child(&mut child, self.studio_pid, TERM_GRACE);
+        } else if let Some(pid) = self.studio_pid {
+            terminate_pid(pid, TERM_GRACE);
         }
-        #[cfg(unix)]
-        if let Some(pid) = self.ssh_pid.take() {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
-        }
-        if let Some(child) = self.studio_child.take() {
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
+        let ssh_pid = self.ssh_pid.take();
+        if let Some(mut tunnel) = self.ssh.take() {
+            terminate_child(&mut tunnel.child, ssh_pid, TERM_GRACE);
+        } else if let Some(pid) = ssh_pid {
+            terminate_pid(pid, TERM_GRACE);
         }
         self.ssh = None;
         self.studio_pid = None;

@@ -155,13 +155,12 @@ pub struct Job {
 
 impl Job {
     /// Terminates the running pg_dump/pg_restore/psql process, if any.
+    /// TERM first with a grace deadline, then KILL; ESRCH-tolerant so a
+    /// just-exited child is not an error.
     pub fn cancel(&self) {
         let pid = self.pid.lock().ok().and_then(|mut slot| slot.take());
         if let Some(pid) = pid {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
+            crate::process::terminate_pid(pid, crate::process::TERM_GRACE);
         }
     }
 

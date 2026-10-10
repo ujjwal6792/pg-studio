@@ -7,6 +7,7 @@ pub mod drizzle;
 pub mod installer;
 pub mod open;
 pub mod persist;
+pub mod process;
 pub mod session;
 pub mod spinner;
 pub mod ssh;

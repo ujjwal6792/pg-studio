@@ -1869,7 +1869,12 @@ impl App {
                         let url = s.tunnel_url.clone().unwrap_or_else(|| {
                             format!("https://local.drizzle.studio?port={}", s.studio_port)
                         });
-                        let pid = s.studio_pid.unwrap();
+                        let pid = match s.studio_pid {
+                            Some(pid) => pid,
+                            // A session without a pid has nothing to persist;
+                            // never let one bad entry abort shutdown for the rest.
+                            None => continue,
+                        };
                         let ssh_pid = s.ssh.as_ref().map(|t| t.child.id()).or(s.ssh_pid);
                         persisted.push(PersistedSession {
                             project_name: s.project_name.clone(),
@@ -1880,9 +1885,10 @@ impl App {
                             tunnel_url: url,
                             log_path: log_path.to_string_lossy().to_string(),
                         });
-                        // Detach: forget the tunnel so its Drop doesn't kill ssh.
-                        let tunnel = s.ssh.take();
-                        std::mem::forget(tunnel);
+                        // Detach: disown the tunnel so its Drop doesn't kill
+                        // ssh; the child is reparented and kept alive for
+                        // re-attach, with its pid persisted above.
+                        crate::process::disown(s.ssh.take());
                         // Drop the child handle without killing it (Child has no
                         // kill-on-drop; the process is reparented and kept alive).
                         s.studio_child = None;
@@ -2112,7 +2118,11 @@ fn run_session(
     let studio_pid = child.id();
 
     {
-        let mut s = session.lock().unwrap();
+        let Ok(mut s) = session.lock() else {
+            // Poisoned mutex: the tailer already panicked; don't take the
+            // start thread down silently panicking too.
+            return;
+        };
         s.studio_child = Some(child);
         s.studio_pid = Some(studio_pid);
         s.log_path = Some(log_path.clone());
@@ -2160,12 +2170,11 @@ fn tail_lines(path: &PathBuf, count: usize) -> Vec<String> {
 
 #[cfg(unix)]
 fn kill_detached(entry: &PersistedSession) {
-    unsafe {
-        libc::kill(-(entry.studio_pgid as i32), libc::SIGKILL);
-        libc::kill(entry.studio_pid as i32, libc::SIGKILL);
-        if let Some(pid) = entry.ssh_pid {
-            libc::kill(pid as i32, libc::SIGKILL);
-        }
+    // Stale pids may already be reused by unrelated processes: signal the
+    // exact pids only (terminate_pid is ESRCH-tolerant), never the group.
+    crate::process::terminate_pid(entry.studio_pid, crate::process::TERM_GRACE);
+    if let Some(pid) = entry.ssh_pid {
+        crate::process::terminate_pid(pid, crate::process::TERM_GRACE);
     }
 }
 

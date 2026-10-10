@@ -8,6 +8,9 @@ pub struct PersistedSession {
     pub project_name: String,
     pub studio_port: u16,
     pub studio_pid: u32,
+    /// Retained for `sessions.json` back-compat only. pg-studio never puts
+    /// children in their own process group, so this is never signalled
+    /// (see the `process` module: direct-PID termination only).
     pub studio_pgid: u32,
     pub ssh_pid: Option<u32>,
     pub tunnel_url: String,
