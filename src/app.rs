@@ -4,7 +4,9 @@ use crate::dbbackup::{self, DumpFormat, Job, JobStatus};
 use crate::drizzle::{check_dependencies, extract_tunnel_url, prepare_workspace, spawn_studio};
 use crate::open::{copy_to_clipboard, open_url};
 use crate::persist::{self, PersistedSession};
+use crate::project_filter::ProjectFilter;
 use crate::session::{RunningSession, SessionStatus};
+use crate::session_registry::SessionRegistry;
 use crate::ssh::{establish_tunnel, find_free_port};
 use crate::theme::Theme;
 use anyhow::{Result, anyhow};
@@ -400,6 +402,7 @@ pub struct App {
     // Projects list scrolling / filtering
     pub project_scroll: usize,
     pub filter: Input,
+    project_filter: ProjectFilter,
     /// Lines kept off the bottom of the Logs pane (0 = follow latest).
     pub log_scroll: usize,
 
@@ -441,7 +444,7 @@ pub struct App {
     pub status_message: String,
     pub error_message: Option<String>,
     pub logs: Arc<Mutex<Vec<String>>>,
-    pub sessions: Vec<Arc<Mutex<RunningSession>>>,
+    pub sessions: SessionRegistry,
     pub theme: Theme,
 }
 
@@ -486,6 +489,7 @@ impl App {
 
             project_scroll: 0,
             filter: Input::default(),
+            project_filter: ProjectFilter::new(),
             log_scroll: 0,
 
             backup_menu_idx: 0,
@@ -520,7 +524,7 @@ impl App {
             ),
             error_message: None,
             logs: Arc::new(Mutex::new(Vec::new())),
-            sessions: Vec::new(),
+            sessions: SessionRegistry::new(),
             theme: Theme::default(),
         };
 
@@ -645,9 +649,10 @@ impl App {
         };
 
         let base = format!("{} (copy)", src.name);
+        let existing = ProjectFilter::name_set(&self.config.projects);
         let mut name = base.clone();
         let mut counter = 2;
-        while self.config.projects.iter().any(|p| p.name == name) {
+        while existing.contains(name.as_str()) {
             name = format!("{base} {counter}");
             counter += 1;
         }
@@ -737,7 +742,15 @@ impl App {
         }
         let name = proj.name.clone();
 
-        let existing_match = self.config.projects.iter().position(|p| p.name == name);
+        // Single pass: a set cannot return the matching index, so scan once
+        // for it directly instead of a `position()` probe.
+        let mut existing_match = None;
+        for (i, p) in self.config.projects.iter().enumerate() {
+            if p.name == name {
+                existing_match = Some(i);
+                break;
+            }
+        }
         if let Some(matching_idx) = existing_match
             && (self.is_new_project || matching_idx != self.selected_project_idx)
         {
@@ -1426,67 +1439,51 @@ impl App {
 
     /// Project indices that survive the current name filter.
     pub fn visible_projects(&self) -> Vec<usize> {
-        let query = self.filter.value().trim().to_lowercase();
-        self.config
-            .projects
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| query.is_empty() || p.name.to_lowercase().contains(&query))
-            .map(|(i, _)| i)
-            .collect()
+        self.project_filter
+            .visible(&self.config.projects, self.filter.value())
     }
 
     /// Moves the selection within the filtered list, snapping to the nearest
     /// visible project when the current one is filtered out.
     pub fn move_selection(&mut self, delta: isize) {
-        let visible = self.visible_projects();
-        if visible.is_empty() {
+        if self
+            .project_filter
+            .visible(&self.config.projects, self.filter.value())
+            .is_empty()
+        {
             return;
         }
-        let new_pos = match visible.iter().position(|&i| i == self.selected_project_idx) {
-            Some(pos) => (pos as isize + delta).clamp(0, visible.len() as isize - 1) as usize,
-            None => {
-                if delta < 0 {
-                    visible.len() - 1
-                } else {
-                    0
-                }
-            }
-        };
-        self.selected_project_idx = visible[new_pos];
+        self.selected_project_idx = self.project_filter.move_within(
+            &self.config.projects,
+            self.filter.value(),
+            self.selected_project_idx,
+            delta,
+        );
         self.load_selected_into_form();
     }
 
     /// Re-selects a visible project if the filter hid the current one.
     pub fn snap_selection_to_visible(&mut self) {
-        let visible = self.visible_projects();
-        if !visible.is_empty() && !visible.contains(&self.selected_project_idx) {
-            self.selected_project_idx = visible[0];
+        let next = self.project_filter.snap(
+            &self.config.projects,
+            self.filter.value(),
+            self.selected_project_idx,
+        );
+        if next != self.selected_project_idx {
+            self.selected_project_idx = next;
             self.load_selected_into_form();
         }
     }
 
     /// Keeps the selected row inside the visible scroll window.
     pub fn clamp_project_scroll(&mut self, viewport_rows: usize) {
-        if viewport_rows == 0 {
-            return;
-        }
-        let pos = match self
-            .visible_projects()
-            .iter()
-            .position(|&i| i == self.selected_project_idx)
-        {
-            Some(p) => p,
-            None => {
-                self.project_scroll = 0;
-                return;
-            }
-        };
-        if pos < self.project_scroll {
-            self.project_scroll = pos;
-        } else if pos >= self.project_scroll + viewport_rows {
-            self.project_scroll = pos + 1 - viewport_rows;
-        }
+        self.project_scroll = self.project_filter.clamp(
+            &self.config.projects,
+            self.filter.value(),
+            self.selected_project_idx,
+            self.project_scroll,
+            viewport_rows,
+        );
     }
 
     /// Scrolls the Logs pane. Positive values page towards history, zero
@@ -1510,10 +1507,7 @@ impl App {
     // --- Sessions ---
 
     pub fn session_for(&self, name: &str) -> Option<Arc<Mutex<RunningSession>>> {
-        self.sessions
-            .iter()
-            .find(|s| s.lock().map(|g| g.project_name == name).unwrap_or(false))
-            .cloned()
+        self.sessions.get(name)
     }
     pub fn selected_session(&self) -> Option<Arc<Mutex<RunningSession>>> {
         self.session_for(&self.selected_project_name())
@@ -1550,19 +1544,7 @@ impl App {
     }
 
     pub fn is_project_running(&self, name: &str) -> bool {
-        self.sessions.iter().any(|s| {
-            s.lock()
-                .map(|g| {
-                    g.project_name == name
-                        && matches!(
-                            g.status,
-                            SessionStatus::Starting
-                                | SessionStatus::Pulling
-                                | SessionStatus::Running
-                        )
-                })
-                .unwrap_or(false)
-        })
+        self.sessions.is_running(name)
     }
 
     pub fn project_state(&self, name: &str) -> Option<ProjectState> {
@@ -1758,12 +1740,11 @@ impl App {
     }
 
     pub fn stop_session_for(&mut self, name: &str) {
-        if let Some(session) = self.session_for(name) {
+        if let Some(session) = self.sessions.get(name) {
             if let Ok(mut s) = session.lock() {
                 s.stop();
             }
-            self.sessions
-                .retain(|s| s.lock().map(|g| g.project_name != name).unwrap_or(false));
+            self.sessions.remove(name);
         }
     }
 
@@ -1802,13 +1783,10 @@ impl App {
 
     fn restore_sessions(&mut self) {
         let entries = persist::load();
+        let known_names = ProjectFilter::name_set(&self.config.projects);
         let mut kept: Vec<PersistedSession> = Vec::new();
         for entry in entries {
-            let project_exists = self
-                .config
-                .projects
-                .iter()
-                .any(|p| p.name == entry.project_name);
+            let project_exists = known_names.contains(entry.project_name.as_str());
             if !project_exists {
                 kill_detached(&entry);
                 continue;
@@ -2398,6 +2376,7 @@ mod tests {
             confirm_action: None,
             project_scroll: 0,
             filter: Input::default(),
+            project_filter: ProjectFilter::new(),
             log_scroll: 0,
             backup_menu_idx: 0,
             input_backup_path: Input::default(),
@@ -2425,7 +2404,7 @@ mod tests {
             status_message: String::new(),
             error_message: None,
             logs: Arc::new(Mutex::new(Vec::new())),
-            sessions: Vec::new(),
+            sessions: SessionRegistry::new(),
             theme: Theme::default(),
         }
     }
