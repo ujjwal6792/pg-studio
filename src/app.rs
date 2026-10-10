@@ -2159,13 +2159,10 @@ fn file_len(path: &PathBuf) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+// Signature frozen by the log-container migration contract (`&PathBuf`).
+#[allow(clippy::ptr_arg)]
 fn tail_lines(path: &PathBuf, count: usize) -> Vec<String> {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    let start = lines.len().saturating_sub(count);
-    lines[start..].iter().map(|s| s.to_string()).collect()
+    crate::log_tailer::read_last_lines(path, count)
 }
 
 #[cfg(unix)]
@@ -2196,8 +2193,19 @@ fn tail_session_log(
         return;
     }
     let mut offset = start_offset;
-    let mut partial = String::new();
+    // Byte accumulator: completed lines drain in one prefix cut per feed
+    // (no per-line memmove) and pending bytes are capped at 1 MiB.
+    let mut partial = crate::log_tailer::PartialLine::new();
+    // Reused across ticks so steady-state polling allocates nothing.
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
     let mut dead_ticks = 0u32;
+    // The port probe is a bind syscall; only re-probe when new output
+    // arrived or at least a second elapsed. `None` probes immediately on
+    // the first tick so fresh sessions still flip to Running fast.
+    let mut last_probe: Option<Instant> = None;
+    // Truncation/rotation check runs on the same 1s cadence instead of a
+    // per-tick metadata syscall.
+    let mut last_len_check = Instant::now();
     loop {
         let Ok(state) = session.lock() else { break };
         if matches!(state.status, SessionStatus::Stopped | SessionStatus::Error) {
@@ -2205,33 +2213,36 @@ fn tail_session_log(
         }
         drop(state);
         let mut saw_url = false;
-        if let Ok(meta) = std::fs::metadata(&log_path)
-            && meta.len() > offset
+        let mut saw_output = false;
+        buf.clear();
+        // No metadata pre-check: a 0-byte read simply means no new output.
+        if file.seek(SeekFrom::Start(offset)).is_ok()
+            && file.read_to_end(&mut buf).is_ok()
+            && !buf.is_empty()
         {
-            let mut chunk = String::new();
-            if file.seek(SeekFrom::Start(offset)).is_ok() && file.read_to_string(&mut chunk).is_ok()
-            {
-                offset += chunk.len() as u64;
-                partial.push_str(&chunk);
-                while let Some(idx) = partial.find('\n') {
-                    let line: String = partial.drain(..idx).collect();
-                    partial.drain(..1);
-                    let line = line.trim_end_matches('\r').to_string();
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    if let Ok(s) = session.lock()
-                        && let Ok(mut l) = s.logs.lock()
-                    {
-                        l.push(line.clone());
-                    }
-                    if let Some(url) = extract_tunnel_url(&line) {
-                        saw_url = true;
-                        if let Ok(mut s) = session.lock() {
-                            s.tunnel_url = Some(url);
-                        }
+            offset += buf.len() as u64;
+            saw_output = true;
+            for line in partial.feed(&buf) {
+                if let Some(url) = extract_tunnel_url(&line) {
+                    saw_url = true;
+                    if let Ok(mut s) = session.lock() {
+                        s.tunnel_url = Some(url);
                     }
                 }
+                if let Ok(s) = session.lock()
+                    && let Ok(mut l) = s.logs.lock()
+                {
+                    l.push(line);
+                }
+            }
+        } else if last_len_check.elapsed() >= std::time::Duration::from_secs(1) {
+            last_len_check = Instant::now();
+            if let Ok(end) = file.seek(SeekFrom::End(0))
+                && end < offset
+            {
+                // Log was truncated/rotated under us: restart from the top.
+                offset = 0;
+                partial.clear();
             }
         }
         let (port, project_name, ready, exited) = {
@@ -2278,29 +2289,40 @@ fn tail_session_log(
             );
             break;
         }
-        let became_ready = !ready && (saw_url || port_in_use(port));
+        // Bind probe, gated: new output (URL or any bytes) justifies an
+        // immediate check, otherwise at most one bind per second.
+        let probe_due = saw_url
+            || saw_output
+            || last_probe
+                .map(|t| t.elapsed() >= std::time::Duration::from_secs(1))
+                .unwrap_or(true);
+        let became_ready = !ready && probe_due && port_in_use(port);
         if became_ready {
-            if let Ok(mut s) = session.lock() {
-                if s.status == SessionStatus::Starting {
-                    s.status = SessionStatus::Running;
-                    s.studio_ready = true;
-                }
+            last_probe = Some(Instant::now());
+            if let Ok(mut s) = session.lock()
+                && s.status == SessionStatus::Starting
+            {
+                s.status = SessionStatus::Running;
+                s.studio_ready = true;
             }
             add_global_log(&global, format!("Project '{}' is running.", project_name));
-        } else if ready && port_in_use(port) {
-            dead_ticks = 0;
-        } else if ready {
-            dead_ticks += 1;
-            if dead_ticks >= 10 {
-                let message = format!("Drizzle Studio stopped listening on port {port}.");
-                if let Ok(mut s) = session.lock() {
-                    s.fail(message.clone());
+        } else if ready && probe_due {
+            last_probe = Some(Instant::now());
+            if port_in_use(port) {
+                dead_ticks = 0;
+            } else {
+                dead_ticks += 1;
+                if dead_ticks >= 10 {
+                    let message = format!("Drizzle Studio stopped listening on port {port}.");
+                    if let Ok(mut s) = session.lock() {
+                        s.fail(message.clone());
+                    }
+                    add_global_log(
+                        &global,
+                        format!("Project '{}' failed: {message}", project_name),
+                    );
+                    break;
                 }
-                add_global_log(
-                    &global,
-                    format!("Project '{}' failed: {message}", project_name),
-                );
-                break;
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
