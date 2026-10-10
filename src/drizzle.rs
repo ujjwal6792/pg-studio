@@ -1,4 +1,5 @@
 use crate::config::{DbTarget, Engine};
+use crate::log_buffer::LogBuffer;
 use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use std::fs;
@@ -18,7 +19,7 @@ pub fn check_dependencies() -> Result<()> {
     Ok(())
 }
 
-fn log(logs: &Arc<Mutex<Vec<String>>>, msg: String) {
+fn log(logs: &Arc<Mutex<LogBuffer>>, msg: String) {
     if let Ok(mut l) = logs.lock() {
         l.push(msg);
     }
@@ -81,7 +82,7 @@ fn workspace_needs_install(
 fn init_workspace(
     workspace_dir: &Path,
     engine: Engine,
-    logs: &Arc<Mutex<Vec<String>>>,
+    logs: &Arc<Mutex<LogBuffer>>,
 ) -> Result<()> {
     let package_json = workspace_dir.join("package.json");
 
@@ -140,7 +141,7 @@ fn init_workspace(
     Ok(())
 }
 
-fn stream_output(logs: &Arc<Mutex<Vec<String>>>, output: &std::process::Output) {
+fn stream_output(logs: &Arc<Mutex<LogBuffer>>, output: &std::process::Output) {
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if !line.trim().is_empty() {
             log(logs, line.to_string());
@@ -203,7 +204,7 @@ fn apply_target_env<'a>(cmd: &'a mut Command, target: &DbTarget) -> &'a mut Comm
 pub fn prepare_workspace(
     project_name: &str,
     target: &DbTarget,
-    logs: &Arc<Mutex<Vec<String>>>,
+    logs: &Arc<Mutex<LogBuffer>>,
 ) -> Result<PathBuf> {
     let workspace_dir = get_workspace_dir(project_name)?;
     let engine = target.engine();
@@ -496,16 +497,17 @@ mod tests {
 
         let (_, changed) = sanitize_pg_schema("export const clean = 1;");
         assert!(!changed);
-        #[test]
-        fn d1_sanitizer_removes_generated_check_declarations() {
-            let input = "export const orgs = sqliteTable('orgs', {\n  id: integer('id').primaryKey()\n  check(\"orgs_check_1\", sql`id > 0`),\n  check(\"orgs_check_1\", sql`id < 100`),\n});";
-            let (output, removed) = sanitize_d1_schema(input);
-            assert_eq!(removed, 2);
-            assert_eq!(
-                output,
-                "export const orgs = sqliteTable('orgs', {\n  id: integer('id').primaryKey()\n});"
-            );
-            assert_eq!(sanitize_d1_schema("const clean = 1;").0, "const clean = 1;");
-        }
+    }
+
+    #[test]
+    fn d1_sanitizer_removes_generated_check_declarations() {
+        let input = "export const orgs = sqliteTable('orgs', {\n  id: integer('id').primaryKey()\n  check(\"orgs_check_1\", sql`id > 0`),\n  check(\"orgs_check_1\", sql`id < 100`),\n});";
+        let (output, removed) = sanitize_d1_schema(input);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            output,
+            "export const orgs = sqliteTable('orgs', {\n  id: integer('id').primaryKey()\n});"
+        );
+        assert_eq!(sanitize_d1_schema("const clean = 1;").0, "const clean = 1;");
     }
 }

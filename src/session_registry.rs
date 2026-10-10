@@ -151,7 +151,7 @@ mod tests {
             ssh: None,
             studio_child: None,
             status,
-            logs: Arc::new(Mutex::new(Vec::new())),
+            logs: Arc::new(Mutex::new(crate::log_buffer::LogBuffer::default())),
             tunnel_url: None,
             error: None,
             auto_open: false,

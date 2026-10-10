@@ -5,6 +5,7 @@ pub mod config;
 pub mod dbbackup;
 pub mod drizzle;
 pub mod installer;
+pub mod log_buffer;
 pub mod log_tailer;
 pub mod open;
 pub mod persist;

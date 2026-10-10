@@ -1010,38 +1010,46 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
                 }
             }
         }
+    }
 
-        if let Some(session) = app.selected_session()
-            && let Ok(s) = session.lock()
-            && let Ok(logs) = s.logs.lock()
-            && !logs.is_empty()
-        {
-            lines.push(Line::from(""));
+    // Guards for the selected session's log tail. Bound here — after the
+    // per-session loop above has released its locks (std Mutex is not
+    // reentrant) — and held through the final render below so visible
+    // lines borrow instead of cloning.
+    let selected = app.selected_session();
+    let session_guard = selected.as_ref().and_then(|s| s.lock().ok());
+    let logs_guard = session_guard.as_ref().and_then(|s| s.logs.lock().ok());
+
+    if !app.sessions.is_empty()
+        && let Some(logs) = logs_guard.as_ref().filter(|l| !l.is_empty())
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Logs (selected project) ",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        let used = lines.len() as u16;
+        let avail = area.height.saturating_sub(used) as usize;
+        let width = (area.width as usize).max(1);
+        // Tail math over cached widths: no per-frame `chars().count()`.
+        let mut budget = avail;
+        let mut start = logs.len();
+        for (_, w) in logs.iter_with_widths().rev() {
+            let wrapped = (w.div_ceil(width)).max(1);
+            if wrapped > budget {
+                break;
+            }
+            budget -= wrapped;
+            start -= 1;
+        }
+        // Borrowed slice, rendered while the lock is held: no clone/join.
+        for text in logs.iter().skip(start) {
             lines.push(Line::from(Span::styled(
-                " Logs (selected project) ",
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
+                text,
+                Style::default().fg(app.theme.dim),
             )));
-            let used = lines.len() as u16;
-            let avail = area.height.saturating_sub(used) as usize;
-            let width = (area.width as usize).max(1);
-            let mut budget = avail;
-            let mut start = logs.len();
-            for l in logs.iter().rev() {
-                let wrapped = (l.chars().count().div_ceil(width)).max(1);
-                if wrapped > budget {
-                    break;
-                }
-                budget -= wrapped;
-                start -= 1;
-            }
-            for l in &logs[start..] {
-                lines.push(Line::from(Span::styled(
-                    l.clone(),
-                    Style::default().fg(app.theme.dim),
-                )));
-            }
         }
     }
 
@@ -1051,6 +1059,40 @@ fn draw_process(f: &mut Frame, app: &App, area: Rect) {
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     let log_border_style = Style::default().fg(app.theme.muted);
 
+    // Fast path: render the visible window over a borrowed slice — no
+    // whole-buffer clone and no `join`. The guards below live through the
+    // render, so every `Line` borrows the buffer.
+    if app.mode != AppMode::EditingForm
+        && let Ok(logs) = app.logs.lock()
+        && !logs.is_empty()
+    {
+        let h = area.height.saturating_sub(2).max(1) as usize;
+        let end = logs.len().saturating_sub(app.log_scroll.min(logs.len()));
+        let start = end.saturating_sub(h);
+        let title = if app.log_scroll > 0 {
+            format!(" Logs & Output  (+{} lines up) ", app.log_scroll)
+        } else {
+            " Logs & Output ".to_string()
+        };
+        let lines: Vec<Line> = logs
+            .iter()
+            .skip(start)
+            .take(end - start)
+            .map(Line::from)
+            .collect();
+        let widget = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(log_border_style),
+            )
+            .wrap(Wrap { trim: false });
+        f.render_widget(widget, area);
+        return;
+    }
+
+    // Empty / poisoned buffer and the field guide fall back to owned text.
     let (bottom_title, bottom_content) = match app.mode {
         AppMode::EditingForm => {
             let (desc, example) = app.active_field.get_help();
@@ -1060,24 +1102,12 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
             )
         }
         _ => {
-            let logs_text = if let Ok(logs) = app.logs.lock() {
-                if logs.is_empty() {
-                    app.status_message.clone()
-                } else {
-                    let h = area.height.saturating_sub(2).max(1) as usize;
-                    let end = logs.len().saturating_sub(app.log_scroll.min(logs.len()));
-                    let start = end.saturating_sub(h);
-                    logs[start..end].join("\n")
-                }
-            } else {
-                app.status_message.clone()
-            };
             let title = if app.log_scroll > 0 {
                 format!(" Logs & Output  (+{} lines up) ", app.log_scroll)
             } else {
                 " Logs & Output ".to_string()
             };
-            (title, logs_text)
+            (title, app.status_message.clone())
         }
     };
 

@@ -2,6 +2,7 @@ use crate::check;
 use crate::config::{AppConfig, ConnectionType, Engine, ProjectBundle, ProjectConfig};
 use crate::dbbackup::{self, DumpFormat, Job, JobStatus};
 use crate::drizzle::{check_dependencies, extract_tunnel_url, prepare_workspace, spawn_studio};
+use crate::log_buffer::{DEFAULT_CAP, LogBuffer};
 use crate::open::{copy_to_clipboard, open_url};
 use crate::persist::{self, PersistedSession};
 use crate::project_filter::ProjectFilter;
@@ -443,7 +444,7 @@ pub struct App {
     pub is_new_project: bool,
     pub status_message: String,
     pub error_message: Option<String>,
-    pub logs: Arc<Mutex<Vec<String>>>,
+    pub logs: Arc<Mutex<LogBuffer>>,
     pub sessions: SessionRegistry,
     pub theme: Theme,
 }
@@ -523,7 +524,7 @@ impl App {
                 "Ready. Press 'n' for New Project, 'Enter' to focus a project (again to launch), '?' for help.",
             ),
             error_message: None,
-            logs: Arc::new(Mutex::new(Vec::new())),
+            logs: Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP))),
             sessions: SessionRegistry::new(),
             theme: Theme::default(),
         };
@@ -1513,11 +1514,18 @@ impl App {
         self.session_for(&self.selected_project_name())
     }
 
+    /// Upper bound on lines materialized for a clipboard copy. The buffer
+    /// itself is already capped; this keeps a single copy action bounded too.
+    const MAX_COPY_LINES: usize = 2000;
+
     fn selected_session_log_text(&self) -> Option<(String, usize, String)> {
         let session = self.selected_session()?;
         let name = self.selected_project_name();
-        let logs = session.lock().ok()?.logs.lock().ok()?.clone();
-        Some((name, logs.len(), logs.join("\n")))
+        let session_guard = session.lock().ok()?;
+        let logs = session_guard.logs.lock().ok()?;
+        // Bounded tail read: no clone of the buffer, single allocation.
+        let text = logs.snapshot_last(Self::MAX_COPY_LINES);
+        Some((name, logs.len().min(Self::MAX_COPY_LINES), text))
     }
 
     pub fn copy_selected_logs(&mut self) {
@@ -1702,7 +1710,7 @@ impl App {
             ssh: None,
             studio_child: None,
             status: SessionStatus::Starting,
-            logs: Arc::new(Mutex::new(Vec::new())),
+            logs: Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP))),
             tunnel_url: None,
             error: None,
             auto_open,
@@ -1793,7 +1801,10 @@ impl App {
             }
             if port_in_use(entry.studio_port) {
                 let log_path = PathBuf::from(&entry.log_path);
-                let logs = tail_lines(&log_path, 50);
+                let mut restored = LogBuffer::new(DEFAULT_CAP);
+                for line in tail_lines(&log_path, 50) {
+                    restored.push(line);
+                }
                 let offset = file_len(&log_path);
                 let session = Arc::new(Mutex::new(RunningSession {
                     project_name: entry.project_name.clone(),
@@ -1801,7 +1812,7 @@ impl App {
                     ssh: None,
                     studio_child: None,
                     status: SessionStatus::Running,
-                    logs: Arc::new(Mutex::new(logs)),
+                    logs: Arc::new(Mutex::new(restored)),
                     tunnel_url: Some(entry.tunnel_url.clone()),
                     error: None,
                     auto_open: false,
@@ -1984,7 +1995,7 @@ fn push_session_log(session: &Arc<Mutex<RunningSession>>, msg: String) {
     }
 }
 
-fn add_global_log(global: &Arc<Mutex<Vec<String>>>, msg: String) {
+fn add_global_log(global: &Arc<Mutex<LogBuffer>>, msg: String) {
     if let Ok(mut g) = global.lock() {
         g.push(msg);
     }
@@ -2007,7 +2018,7 @@ fn session_cancelled(session: &Arc<Mutex<RunningSession>>) -> bool {
 fn run_session(
     proj: ProjectConfig,
     session: Arc<Mutex<RunningSession>>,
-    global_logs: Arc<Mutex<Vec<String>>>,
+    global_logs: Arc<Mutex<LogBuffer>>,
 ) {
     let name = proj.name.clone();
 
@@ -2067,7 +2078,7 @@ fn run_session(
     let session_logs = session
         .lock()
         .map(|s| s.logs.clone())
-        .unwrap_or_else(|_| Arc::new(Mutex::new(Vec::new())));
+        .unwrap_or_else(|_| Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP))));
     let workspace = match prepare_workspace(&proj.name, &target, &session_logs) {
         Ok(w) => w,
         Err(e) => {
@@ -2158,7 +2169,7 @@ fn kill_detached(_entry: &PersistedSession) {}
 
 fn tail_session_log(
     session: Arc<Mutex<RunningSession>>,
-    global: Arc<Mutex<Vec<String>>>,
+    global: Arc<Mutex<LogBuffer>>,
     log_path: PathBuf,
     start_offset: u64,
 ) {
@@ -2425,7 +2436,7 @@ mod tests {
             is_new_project: false,
             status_message: String::new(),
             error_message: None,
-            logs: Arc::new(Mutex::new(Vec::new())),
+            logs: Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP))),
             sessions: SessionRegistry::new(),
             theme: Theme::default(),
         }
@@ -2528,7 +2539,9 @@ mod tests {
             cf_database_id: String::new(),
             last_opened: 0,
         });
-        let logs = Arc::new(Mutex::new(vec!["first".to_string(), "second".to_string()]));
+        let logs = Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP)));
+        logs.lock().unwrap().push("first".to_string());
+        logs.lock().unwrap().push("second".to_string());
         app.sessions.push(Arc::new(Mutex::new(RunningSession {
             project_name: "demo".to_string(),
             studio_port: 1,
@@ -2550,7 +2563,7 @@ mod tests {
             (name, count, text),
             ("demo".to_string(), 2, "first\nsecond".to_string())
         );
-        *logs.lock().unwrap() = Vec::new();
+        logs.lock().unwrap().clear();
         assert_eq!(app.selected_session_log_text().unwrap().1, 0);
     }
     #[cfg(unix)]
@@ -2568,7 +2581,7 @@ mod tests {
             ssh: None,
             studio_child: Some(child),
             status: SessionStatus::Starting,
-            logs: Arc::new(Mutex::new(Vec::new())),
+            logs: Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP))),
             tunnel_url: None,
             error: None,
             auto_open: true,
@@ -2578,7 +2591,7 @@ mod tests {
             log_path: Some(path.clone()),
             started_at: None,
         }));
-        let global = Arc::new(Mutex::new(Vec::new()));
+        let global = Arc::new(Mutex::new(LogBuffer::new(DEFAULT_CAP)));
         tail_session_log(session.clone(), global.clone(), path.clone(), 0);
         let state = session.lock().unwrap();
         assert_eq!(state.status, SessionStatus::Error);

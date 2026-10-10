@@ -1,3 +1,4 @@
+use crate::log_buffer::LogBuffer;
 use crate::ssh::SshTunnel;
 use std::path::PathBuf;
 use std::process::Child;
@@ -18,7 +19,7 @@ pub struct RunningSession {
     pub ssh: Option<SshTunnel>,
     pub studio_child: Option<Child>,
     pub status: SessionStatus,
-    pub logs: Arc<Mutex<Vec<String>>>,
+    pub logs: Arc<Mutex<LogBuffer>>,
     pub tunnel_url: Option<String>,
     pub error: Option<String>,
     pub auto_open: bool,
