@@ -64,13 +64,13 @@ Download and install the latest pre-compiled binary directly from
 
 ```bash
 # Apple Silicon Mac
-curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.5.4-aarch64-apple-darwin.tar.gz | tar -xz
+curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.5.5-aarch64-apple-darwin.tar.gz | tar -xz
 # Intel Mac
-curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.5.4-x86_64-apple-darwin.tar.gz | tar -xz
+curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.5.5-x86_64-apple-darwin.tar.gz | tar -xz
 # Linux (x86_64)
-curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.5.4-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+curl -L https://github.com/ujjwal6792/pg-studio/releases/latest/download/pg-studio-v0.5.5-x86_64-unknown-linux-gnu.tar.gz | tar -xz
 # Windows (x86_64, PowerShell): download and extract
-# pg-studio-v0.5.4-x86_64-pc-windows-msvc.tar.gz, then move pg-studio.exe
+# pg-studio-v0.5.5-x86_64-pc-windows-msvc.tar.gz, then move pg-studio.exe
 # somewhere on your PATH.
 sudo mv pg-studio /usr/local/bin/
 ```
@@ -80,7 +80,7 @@ sudo mv pg-studio /usr/local/bin/
 To build and install a specific tagged release directly via Cargo:
 
 ```bash
-cargo install --git https://github.com/ujjwal6792/pg-studio --tag v0.5.4 --force
+cargo install --git https://github.com/ujjwal6792/pg-studio --tag v0.5.5 --force
 ```
 
 Or install the latest edge version straight from the `main` branch:
@@ -92,7 +92,7 @@ cargo install --git https://github.com/ujjwal6792/pg-studio --force
 ### Option 3: Install via Crates.io (When published)
 
 ```bash
-cargo install pg-studio --version 0.5.4
+cargo install pg-studio --version 0.5.5
 ```
 
 ## Prerequisites
